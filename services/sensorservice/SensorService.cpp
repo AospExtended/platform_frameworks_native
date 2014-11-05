@@ -206,9 +206,10 @@ void SensorService::onFirstRef() {
                 // available in the HAL
                 bool needRotationVector =
                         (virtualSensorsNeeds & (1<<SENSOR_TYPE_ROTATION_VECTOR)) != 0;
+                bool needOrientation = orientationIndex == -1;
 
                 registerSensor(new RotationVectorSensor(), !needRotationVector, true);
-                registerSensor(new OrientationSensor(), !needRotationVector, true);
+                registerSensor(new OrientationSensor(), !needOrientation, true);
 
                 // virtual debugging sensors are not for user
                 registerSensor( new CorrectedGyroSensor(list, count), true, true);
