@@ -144,6 +144,9 @@ struct InputReaderConfiguration {
         // The presence of an external stylus has changed.
         CHANGE_EXTERNAL_STYLUS_PRESENCE = 1 << 7,
 
+        // Volume keys rotation option changed.
+        CHANGE_VOLUME_KEYS_ROTATION = 1 << 7,
+
         // All devices must be reopened.
         CHANGE_MUST_REOPEN = 1 << 31,
     };
@@ -231,6 +234,10 @@ struct InputReaderConfiguration {
     // True to show the location of touches on the touch screen as spots.
     bool showTouches;
 
+    // Remap volume keys according to display rotation
+    // 0 - disabled, 1 - phone or hybrid rotation mode, 2 - tablet rotation mode
+    int volumeKeysRotationMode;
+
     InputReaderConfiguration() :
             virtualKeyQuietTime(0),
             pointerVelocityControlParameters(1.0f, 500.0f, 3000.0f, 3.0f),
@@ -247,7 +254,8 @@ struct InputReaderConfiguration {
             pointerGestureSwipeMaxWidthRatio(0.25f),
             pointerGestureMovementSpeedRatio(0.8f),
             pointerGestureZoomSpeedRatio(0.3f),
-            showTouches(false) { }
+            showTouches(false),
+            volumeKeysRotationMode(0) { }
 
     bool getDisplayInfo(bool external, DisplayViewport* outViewport) const;
     void setDisplayInfo(bool external, const DisplayViewport& viewport);
@@ -1134,7 +1142,8 @@ private:
     uint32_t mSource;
     int32_t mKeyboardType;
 
-    int32_t mOrientation; // orientation for dpad keys
+    int32_t mRotationMapOffset; // determines if and how volume keys rotate
+    int32_t mOrientation; // orientation for dpad and volume keys
 
     Vector<KeyDown> mKeyDowns; // keys that are down
     int32_t mMetaState;
