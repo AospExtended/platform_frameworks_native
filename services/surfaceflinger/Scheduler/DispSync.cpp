@@ -25,6 +25,7 @@
 #include <algorithm>
 
 #include <android-base/stringprintf.h>
+#include <bfqio/bfqio.h>
 #include <cutils/properties.h>
 #include <bfqio/bfqio.h>
 #include <log/log.h>
