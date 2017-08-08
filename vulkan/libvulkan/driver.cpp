@@ -188,6 +188,8 @@ bool Hal::Open() {
     // Use a stub device unless we successfully open a real HAL device.
     hal_.dev_ = &stubhal::kDevice;
 
+    int result;
+    const hwvulkan_module_t* module = nullptr;
 
     // Use stub HAL if vulkan is disabled
     bool disableVulkan = property_get_bool("persist.graphics.vulkan.disable", false);
@@ -195,9 +197,6 @@ bool Hal::Open() {
         ALOGI("no Vulkan HAL present, using stub HAL");
         return true;
     }
-
-    int result;
-    const hwvulkan_module_t* module = nullptr;
 
     result = LoadUpdatedDriver(reinterpret_cast<const hw_module_t**>(&module));
     if (result == -ENOENT) {
