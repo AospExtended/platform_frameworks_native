@@ -620,6 +620,9 @@ private:
     void updateVrFlinger();
 #endif
 
+    // Panel hardware rotation
+    int32_t mHardwareRotation;
+
     /* ------------------------------------------------------------------------
      * Attributes
      */
