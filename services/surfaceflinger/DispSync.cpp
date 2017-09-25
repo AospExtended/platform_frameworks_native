@@ -24,7 +24,6 @@
 
 #include <algorithm>
 
-#include <cutils/iosched_policy.h>
 #include <log/log.h>
 #include <utils/String8.h>
 #include <utils/Thread.h>
@@ -390,7 +389,6 @@ DispSync::DispSync(const char* name) :
         ALOGE("Couldn't set SCHED_FIFO for DispSyncThread");
     }
 
-    android_set_rt_ioprio(mThread->getTid(), 1);
 
     reset();
     beginResync();
