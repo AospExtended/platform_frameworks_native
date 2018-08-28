@@ -17,5 +17,5 @@
 <!-- This is the standard feature indicating that the device has a Vulkan
      driver that supports API version 1.0.3 (0x00400003) -->
 <permissions>
-    <feature name="android.hardware.vulkan.version" version="4194307" />
+    <feature name="android.hardware.vulkan.version" version="4198400" />
 </permissions>
