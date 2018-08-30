@@ -96,8 +96,9 @@ Gralloc2::Error Mapper::validateBufferDescriptorInfo(
     }
 
     if (descriptorInfo.usage & ~validUsageBits) {
-        ALOGW("buffer descriptor contains invalid usage bits 0x%" PRIx64,
+        ALOGE("buffer descriptor contains invalid usage bits 0x%" PRIx64,
               descriptorInfo.usage & ~validUsageBits);
+        return Error::BAD_VALUE;
     }
     return Error::NONE;
 }
