@@ -849,6 +849,7 @@ private:
     int mDebugRegion;
     int mDebugDDMS;
     int mDebugDisableHWC;
+    bool mDebugPropDisableHWC;
     int mDebugDisableTransformHint;
     volatile nsecs_t mDebugInSwapBuffers;
     nsecs_t mLastSwapBufferTime;
