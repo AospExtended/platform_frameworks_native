@@ -110,10 +110,11 @@ BpBinder* BpBinder::create(int32_t handle) {
     int32_t trackedUid = -1;
     if (sCountByUidEnabled) {
         trackedUid = IPCThreadState::self()->getCallingUid();
-        AutoMutex _l(sTrackingLock);
+        sTrackingLock.lock();
         uint32_t trackedValue = sTrackingMap[trackedUid];
         if (CC_UNLIKELY(trackedValue & LIMIT_REACHED_MASK)) {
             if (sBinderProxyThrottleCreate) {
+                sTrackingLock.unlock();
                 return nullptr;
             }
         } else {
@@ -121,16 +122,21 @@ BpBinder* BpBinder::create(int32_t handle) {
                 ALOGE("Too many binder proxy objects sent to uid %d from uid %d (%d proxies held)",
                       getuid(), trackedUid, trackedValue);
                 sTrackingMap[trackedUid] |= LIMIT_REACHED_MASK;
+                sTrackingLock.unlock();
+                // Release sTrackingLock before calling into BinderProxy, or we might end in dead lock
                 if (sLimitCallback) sLimitCallback(trackedUid);
+                sTrackingLock.lock();
                 if (sBinderProxyThrottleCreate) {
                     ALOGI("Throttling binder proxy creates from uid %d in uid %d until binder proxy"
                           " count drops below %d",
                           trackedUid, getuid(), sBinderProxyCountLowWatermark);
                     return nullptr;
+                    sTrackingLock.unlock();
                 }
             }
         }
         sTrackingMap[trackedUid]++;
+        sTrackingLock.unlock();
     }
     return new BpBinder(handle, trackedUid);
 }
