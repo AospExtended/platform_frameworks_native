@@ -31,11 +31,6 @@ cc_defaults {
         "android.hardware.graphics.composer@2.3",
         "android.hardware.power@1.0",
         "android.hardware.power@1.3",
-        "vendor.display.config@1.1",
-        "vendor.display.config@1.2",
-        "vendor.display.config@1.6",
-        "vendor.display.config@1.7",
-        "vendor.display.config@1.9",
         "libbase",
         "libbfqio",
         "libbinder",
@@ -173,6 +168,9 @@ cc_library_shared {
     // built, so the same settings can be used elsewhere.
     name: "libsurfaceflinger",
     defaults: ["libsurfaceflinger_production_defaults"],
+    cppflags: [
+        "-Wno-unused-parameter",
+    ],
     srcs: [
         ":libsurfaceflinger_sources",
 
@@ -183,6 +181,16 @@ cc_library_shared {
     logtags: ["EventLog/EventLogTags.logtags"],
     product_variables: {
         aosp: {
+            uses_qcom_um_family: {
+                cflags: ["-DQCOM_UM_FAMILY"],
+                shared_libs: [
+                    "vendor.display.config@1.1",
+                    "vendor.display.config@1.2",
+                    "vendor.display.config@1.6",
+                    "vendor.display.config@1.7",
+                    "vendor.display.config@1.9",
+                ],
+            },
             uses_qcom_um_3_18_family: {
                 header_libs: [
                     "//hardware/qcom-caf/msm8996/display:display_intf_headers",

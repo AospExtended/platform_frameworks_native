@@ -61,7 +61,9 @@
 #include "LayerRejecter.h"
 #include "MonitoredProducer.h"
 #include "SurfaceFlinger.h"
+#ifdef QCOM_UM_FAMILY
 #include "gralloc_priv.h"
+#endif
 
 #include "TimeStats/TimeStats.h"
 
@@ -653,8 +655,12 @@ bool Layer::isSecure() const {
 }
 
 bool Layer::isSecureDisplay() const {
+#ifdef QCOM_UM_FAMILY
     const sp<GraphicBuffer>& activeBuffer(mActiveBuffer);
     return activeBuffer && (activeBuffer->getUsage() & GRALLOC_USAGE_PRIVATE_SECURE_DISPLAY);
+#else
+    return false;
+#endif
 }
 
 void Layer::setVisibleRegion(const Region& visibleRegion) {

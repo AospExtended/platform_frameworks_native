@@ -30,8 +30,10 @@
 #include "SurfaceInterceptor.h"
 
 #include "TimeStats/TimeStats.h"
+#ifdef QCOM_UM_FAMILY
 #include "frame_extn_intf.h"
 #include "smomo_interface.h"
+#endif
 
 namespace android {
 
@@ -113,6 +115,7 @@ bool BufferQueueLayer::shouldPresentNow(nsecs_t expectedPresentTime) const {
 
     bool isDue = addedTime < expectedPresentTime;
 
+#ifdef QCOM_UM_FAMILY
     if (isDue && mFlinger->mUseSmoMo) {
         smomo::SmomoBufferStats bufferStats;
         bufferStats.id = getSequence();
@@ -121,6 +124,7 @@ bool BufferQueueLayer::shouldPresentNow(nsecs_t expectedPresentTime) const {
         bufferStats.timestamp = mQueueItems[0].mTimestamp;
         isDue = mFlinger->mSmoMo->ShouldPresentNow(bufferStats, expectedPresentTime);
     }
+#endif
 
     return isDue || !isPlausible;
 }
@@ -491,7 +495,7 @@ void BufferQueueLayer::onFrameAvailable(const BufferItem& item) {
 
     mFlinger->mInterceptor->saveBufferUpdate(this, item.mGraphicBuffer->getWidth(),
                                              item.mGraphicBuffer->getHeight(), item.mFrameNumber);
-
+#ifdef QCOM_UM_FAMILY
     if (mFlinger->mUseSmoMo) {
         smomo::SmomoBufferStats bufferStats;
         bufferStats.id = getSequence();
@@ -500,12 +504,14 @@ void BufferQueueLayer::onFrameAvailable(const BufferItem& item) {
         bufferStats.timestamp = item.mTimestamp;
         mFlinger->mSmoMo->CollectLayerStats(bufferStats);
     }
+#endif
 
     // If this layer is orphaned, then we run a fake vsync pulse so that
     // dequeueBuffer doesn't block indefinitely.
     if (isRemovedFromCurrentState()) {
         fakeVsync();
     } else {
+#ifdef QCOM_UM_FAMILY
         if (mFlinger->mFrameExtn && mFlinger->mDolphinFuncsEnabled) {
             composer::FrameInfo frameInfo;
             Rect crop;
@@ -533,6 +539,7 @@ void BufferQueueLayer::onFrameAvailable(const BufferItem& item) {
             }
             mFlinger->mFrameExtn->SetFrameInfo(frameInfo);
         }
+#endif
         mFlinger->signalLayerUpdate();
     }
     mConsumer->onBufferAvailable(item);
