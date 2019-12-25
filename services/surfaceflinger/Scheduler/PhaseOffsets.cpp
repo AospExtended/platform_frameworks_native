@@ -67,6 +67,7 @@ PhaseOffsets::PhaseOffsets() {
     property_get("debug.sf.high_fps_late_sf_phase_offset_ns", value, "1000000");
     const int highFpsLateSfOffsetNs = atoi(value);
 
+#ifdef QCOM_UM_FAMILY
     // Phase Offsets for PERFORMANCE Refresh Rate type.
     property_get("debug.sf.perf_fps_early_phase_offset_ns", value, "-1");
     const int perfFpsEarlySfOffsetNs = atoi(value);
@@ -85,6 +86,7 @@ PhaseOffsets::PhaseOffsets() {
 
     property_get("debug.sf.perf_fps_late_app_phase_offset_ns", value, "-1");
     const int perfFpsLateAppOffsetNs = atoi(value);
+#endif
 
     // Below defines the threshold when an offset is considered to be negative, i.e. targeting
     // for the N+2 vsync instead of N+1. This means that:
@@ -95,7 +97,6 @@ PhaseOffsets::PhaseOffsets() {
 
     Offsets defaultOffsets;
     Offsets highFpsOffsets;
-    Offsets perfFpsOffsets;
 
     defaultOffsets.early = {RefreshRateType::DEFAULT,
                             earlySfOffsetNs != -1 ? earlySfOffsetNs : sfVsyncPhaseOffsetNs,
@@ -105,20 +106,28 @@ PhaseOffsets::PhaseOffsets() {
                               earlyGlAppOffsetNs != -1 ? earlyGlAppOffsetNs : vsyncPhaseOffsetNs};
     defaultOffsets.late = {RefreshRateType::DEFAULT, sfVsyncPhaseOffsetNs, vsyncPhaseOffsetNs};
 
-    highFpsOffsets.early = {RefreshRateType::HIGH1,
+    RefreshRateType highRefreshRate = RefreshRateType::PERFORMANCE;
+
+#ifdef QCOM_UM_FAMILY
+    highRefreshRate = RefreshRateType::HIGH1;
+#endif
+
+    highFpsOffsets.early = {highRefreshRate,
                             highFpsEarlySfOffsetNs != -1 ? highFpsEarlySfOffsetNs
                                                          : highFpsLateSfOffsetNs,
                             highFpsEarlyAppOffsetNs != -1 ? highFpsEarlyAppOffsetNs
                                                           : highFpsLateAppOffsetNs};
-    highFpsOffsets.earlyGl = {RefreshRateType::HIGH1,
+    highFpsOffsets.earlyGl = {highRefreshRate,
                               highFpsEarlyGlSfOffsetNs != -1 ? highFpsEarlyGlSfOffsetNs
                                                              : highFpsLateSfOffsetNs,
                               highFpsEarlyGlAppOffsetNs != -1 ? highFpsEarlyGlAppOffsetNs
                                                               : highFpsLateAppOffsetNs};
-    highFpsOffsets.late = {RefreshRateType::HIGH1, highFpsLateSfOffsetNs,
+    highFpsOffsets.late = {highRefreshRate, highFpsLateSfOffsetNs,
                            highFpsLateAppOffsetNs};
 
+#ifdef QCOM_UM_FAMILY
     // If a perf_fps property is not configured, it defaults to corresponding high_fps prop value.
+    Offsets perfFpsOffsets;
     perfFpsOffsets.early = {RefreshRateType::PERFORMANCE,
                             perfFpsEarlySfOffsetNs != -1 ? perfFpsEarlySfOffsetNs
                                                          : highFpsOffsets.early.sf,
@@ -134,15 +143,20 @@ PhaseOffsets::PhaseOffsets() {
                                                        : highFpsOffsets.late.sf,
                            perfFpsLateAppOffsetNs != -1 ? perfFpsLateAppOffsetNs
                                                         : highFpsOffsets.late.app};
+#endif
 
     mOffsets.insert({RefreshRateType::POWER_SAVING, defaultOffsets});
+    mOffsets.insert({RefreshRateType::DEFAULT, defaultOffsets});
+#ifdef QCOM_UM_FAMILY
+    mOffsets.insert({RefreshRateType::PERFORMANCE, perfFpsOffsets});
     mOffsets.insert({RefreshRateType::LOW0, defaultOffsets});
     mOffsets.insert({RefreshRateType::LOW1, defaultOffsets});
     mOffsets.insert({RefreshRateType::LOW2, defaultOffsets});
-    mOffsets.insert({RefreshRateType::DEFAULT, defaultOffsets});
-    mOffsets.insert({RefreshRateType::PERFORMANCE, perfFpsOffsets});
     mOffsets.insert({RefreshRateType::HIGH1, highFpsOffsets});
     mOffsets.insert({RefreshRateType::HIGH2, highFpsOffsets});
+#else
+    mOffsets.insert({RefreshRateType::PERFORMANCE, highFpsOffsets});
+#endif
 
     mOffsetThresholdForNextVsync = phaseOffsetThresholdForNextVsyncNs != -1
             ? phaseOffsetThresholdForNextVsyncNs
