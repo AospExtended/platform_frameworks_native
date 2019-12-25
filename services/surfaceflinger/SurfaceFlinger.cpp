@@ -674,8 +674,13 @@ void SurfaceFlinger::bootFinished()
         }
 
         // set the refresh rate according to the policy
+#ifdef QCOM_UM_FAMILY
         int maxSupportedType = (int)RefreshRateType::PERF2;
         int minSupportedType = (int)RefreshRateType::LOW0;
+#else
+        int maxSupportedType = (int)RefreshRateType::PERFORMANCE;
+        int minSupportedType = (int)RefreshRateType::POWER_SAVING;
+#endif
 
         for (int type = maxSupportedType; type >= minSupportedType; type--) {
             RefreshRateType refreshRateType = static_cast<RefreshRateType>(type);

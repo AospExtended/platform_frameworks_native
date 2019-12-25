@@ -39,7 +39,11 @@ public:
     // Enum to indicate which vsync rate to run at. Power saving is intended to be the lowest
     // (eg. when the screen is in AOD mode or off), default is the old 60Hz, and performance
     // is the new 90Hz. Eventually we want to have a way for vendors to map these in the configs.
+#ifdef QCOM_UM_FAMILY
     enum class RefreshRateType {POWER_SAVING, LOW0, LOW1, LOW2, DEFAULT, PERFORMANCE, PERF1, PERF2};
+#else
+    enum class RefreshRateType {POWER_SAVING, DEFAULT, PERFORMANCE};
+#endif
 
     struct RefreshRate {
         // This config ID corresponds to the position of the config in the vector that is stored
@@ -112,8 +116,13 @@ public:
                       return a.second > b.second;
                   });
 
+#ifdef QCOM_UM_FAMILY
         int maxRefreshType = (int)RefreshRateType::PERF2;
         int lowRefreshType = (int)RefreshRateType::LOW0;
+#else
+        int maxRefreshType = (int)RefreshRateType::PERFORMANCE;
+        int lowRefreshType = (int)RefreshRateType::POWER_SAVING;
+#endif
         int defaultType = (int)RefreshRateType::DEFAULT;
         int type = (int)RefreshRateType::DEFAULT;
 
