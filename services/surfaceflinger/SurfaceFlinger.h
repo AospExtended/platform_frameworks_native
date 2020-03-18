@@ -577,6 +577,7 @@ private:
     void updateInputFlinger();
     void updateInputWindowInfo();
     void commitInputWindowCommands() REQUIRES(mStateLock);
+    void executeInputWindowCommands();
     void setInputWindowsFinished();
     void updateCursorAsync();
 
