@@ -573,6 +573,7 @@ status_t HWComposer::presentAndGetReleaseFences(DisplayId displayId) {
         return NO_ERROR;
     }
 
+    displayData.lastPresentFence = Fence::NO_FENCE;
     auto error = hwcDisplay->present(&displayData.lastPresentFence);
     RETURN_IF_HWC_ERROR_FOR("present", error, displayId, UNKNOWN_ERROR);
 
@@ -595,9 +596,6 @@ status_t HWComposer::setPowerMode(DisplayId displayId, int32_t intMode) {
     }
 
     auto mode = static_cast<HWC2::PowerMode>(intMode);
-    if (mode == HWC2::PowerMode::Off) {
-        setVsyncEnabled(displayId, HWC2::Vsync::Disable);
-    }
 
     auto& hwcDisplay = displayData.hwcDisplay;
     switch (mode) {
@@ -822,6 +820,16 @@ std::optional<hwc2_display_t> HWComposer::fromPhysicalDisplayId(DisplayId displa
         return it->second.hwcDisplay->getId();
     }
     return {};
+}
+
+status_t HWComposer::setDisplayElapseTime(DisplayId displayId, uint64_t timeStamp) {
+    RETURN_IF_INVALID_DISPLAY(displayId, BAD_INDEX);
+    const auto& displayData = mDisplayData[displayId];
+
+    auto error = displayData.hwcDisplay->setDisplayElapseTime(timeStamp);
+    if (error == HWC2::Error::BadParameter) RETURN_IF_HWC_ERROR(error, displayId, BAD_VALUE);
+    RETURN_IF_HWC_ERROR(error, displayId, UNKNOWN_ERROR);
+    return NO_ERROR;
 }
 
 std::optional<DisplayIdentificationInfo> HWComposer::onHotplugConnect(hwc2_display_t hwcDisplayId) {
