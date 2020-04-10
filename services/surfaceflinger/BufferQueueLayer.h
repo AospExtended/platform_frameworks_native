@@ -140,7 +140,9 @@ private:
     std::atomic<bool> mSidebandStreamChanged{false};
 
     void fakeVsync();
+#ifdef QCOM_UM_FAMILY
     nsecs_t mLastTimeStamp = -1;
+#endif
 };
 
 } // namespace android
