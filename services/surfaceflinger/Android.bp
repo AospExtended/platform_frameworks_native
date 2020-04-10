@@ -29,15 +29,8 @@ cc_defaults {
         "android.hardware.graphics.composer@2.1",
         "android.hardware.graphics.composer@2.2",
         "android.hardware.graphics.composer@2.3",
-        "vendor.qti.hardware.display.composer@2.1",
         "android.hardware.power@1.0",
         "android.hardware.power@1.3",
-        "vendor.display.config@1.1",
-        "vendor.display.config@1.2",
-        "vendor.display.config@1.6",
-        "vendor.display.config@1.7",
-        "vendor.display.config@1.9",
-        "vendor.display.config@1.12",
         "libbase",
         "libbfqio",
         "libbinder",
@@ -65,8 +58,6 @@ cc_defaults {
         "libinput",
         "libutils",
         "libSurfaceFlingerProp",
-        "libqdMetaData.system",
-        "vendor.qti.hardware.display.composer@2.0",
     ],
     static_libs: [
         "libcompositionengine",
@@ -79,8 +70,7 @@ cc_defaults {
     header_libs: [
         "android.hardware.graphics.composer@2.1-command-buffer",
         "android.hardware.graphics.composer@2.2-command-buffer",
-        "android.hardware.graphics.composer@2.3-command-buffer",
-        "display_intf_headers"
+        "android.hardware.graphics.composer@2.3-command-buffer"
     ],
     export_static_lib_headers: [
         "libcompositionengine",
@@ -178,6 +168,9 @@ cc_library_shared {
     // built, so the same settings can be used elsewhere.
     name: "libsurfaceflinger",
     defaults: ["libsurfaceflinger_production_defaults"],
+    cppflags: [
+        "-Wno-unused-parameter",
+    ],
     srcs: [
         ":libsurfaceflinger_sources",
 
@@ -186,6 +179,55 @@ cc_library_shared {
         "SurfaceFlingerFactory.cpp",
     ],
     logtags: ["EventLog/EventLogTags.logtags"],
+    product_variables: {
+        aosp: {
+            uses_qcom_um_family: {
+                cflags: ["-DQCOM_UM_FAMILY"],
+                shared_libs: [
+                    "vendor.display.config@1.1",
+                    "vendor.display.config@1.2",
+                    "vendor.display.config@1.6",
+                    "vendor.display.config@1.7",
+                    "vendor.display.config@1.9",
+                    "vendor.display.config@1.12",
+                    "vendor.qti.hardware.display.composer@2.0",
+                    "vendor.qti.hardware.display.composer@2.1",
+                ],
+            },
+            uses_qcom_um_3_18_family: {
+                header_libs: [
+                    "//hardware/qcom-caf/msm8996/display:display_intf_headers",
+                ],
+                shared_libs: [
+                    "//hardware/qcom-caf/msm8996/display:libqdMetaData.system",
+                ],
+            },
+            uses_qcom_um_4_4_family: {
+                header_libs: [
+                    "//hardware/qcom-caf/msm8998/display:display_intf_headers",
+                ],
+                shared_libs: [
+                    "//hardware/qcom-caf/msm8998/display:libqdMetaData.system",
+                ],
+            },
+            uses_qcom_um_4_9_family: {
+                header_libs: [
+                    "//hardware/qcom-caf/sdm845/display:display_intf_headers",
+                ],
+                shared_libs: [
+                    "//hardware/qcom-caf/sdm845/display:libqdMetaData.system",
+                ],
+            },
+            uses_qcom_um_4_14_family: {
+                header_libs: [
+                    "//hardware/qcom-caf/sm8150/display:display_intf_headers",
+                ],
+                shared_libs: [
+                    "//hardware/qcom-caf/sm8150/display:libqdMetaData.system",
+                ],
+            },
+        },
+    },
 }
 
 cc_defaults {
