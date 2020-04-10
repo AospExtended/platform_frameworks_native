@@ -28,7 +28,7 @@ public:
     DispSyncSource(DispSync* dispSync, nsecs_t phaseOffset, nsecs_t offsetThresholdForNextVsync,
                    bool traceVsync, const char* name);
 
-    ~DispSyncSource() override = default;
+    ~DispSyncSource();
 
     // The following methods are implementation of VSyncSource.
     void setVSyncEnabled(bool enable) override;
@@ -60,6 +60,8 @@ private:
     nsecs_t mPhaseOffset GUARDED_BY(mVsyncMutex);
     const nsecs_t mOffsetThresholdForNextVsync;
     bool mEnabled GUARDED_BY(mVsyncMutex) = false;
+    void *mDolphinHandle = nullptr;
+    bool (*mDolphinCheck)(const char* name) = nullptr;
 };
 
 } // namespace android

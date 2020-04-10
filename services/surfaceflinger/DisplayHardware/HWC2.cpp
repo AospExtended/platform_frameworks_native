@@ -28,6 +28,7 @@
 #include <ui/GraphicBuffer.h>
 
 #include <android/configuration.h>
+#include <vendor/display/config/1.12/IDisplayConfig.h>
 
 #include <inttypes.h>
 #include <algorithm>
@@ -640,6 +641,12 @@ Error Display::setOutputBuffer(const sp<GraphicBuffer>& buffer,
     return static_cast<Error>(intError);
 }
 
+Error Display::setDisplayElapseTime(uint64_t timeStamp)
+{
+    auto intError = mComposer.setDisplayElapseTime(mId, timeStamp);
+    return static_cast<Error>(intError);
+}
+
 Error Display::setPowerMode(PowerMode mode)
 {
     auto intMode = static_cast<Hwc2::IComposerClient::PowerMode>(mode);
@@ -752,6 +759,15 @@ int32_t Display::getAttribute(hwc2_config_t configId, Attribute attribute)
 void Display::loadConfig(hwc2_config_t configId)
 {
     ALOGV("[%" PRIu64 "] loadConfig(%u)", mId, configId);
+    bool smart_panel = false;
+
+    if (mId == HWC_DISPLAY_PRIMARY) {
+        using vendor::display::config::V1_12::IDisplayConfig;
+        android::sp<IDisplayConfig> disp_config_v1_12 = IDisplayConfig::tryGetService();
+        if (disp_config_v1_12 != NULL) {
+            smart_panel = disp_config_v1_12->isSmartPanelConfig(mId, configId);
+        }
+    }
 
     auto config = Config::Builder(*this, configId)
             .setWidth(getAttribute(configId, Attribute::Width))
@@ -759,6 +775,7 @@ void Display::loadConfig(hwc2_config_t configId)
             .setVsyncPeriod(getAttribute(configId, Attribute::VsyncPeriod))
             .setDpiX(getAttribute(configId, Attribute::DpiX))
             .setDpiY(getAttribute(configId, Attribute::DpiY))
+            .setSmartPanel(smart_panel)
             .build();
     mConfigs.emplace(configId, std::move(config));
 }
@@ -1029,6 +1046,20 @@ Error Layer::setInfo(uint32_t type, uint32_t appId)
 {
   auto intError = mComposer.setLayerInfo(mDisplayId, mId, type, appId);
   return static_cast<Error>(intError);
+}
+
+Error Layer::setType(uint32_t type)
+{
+    if (type == mType) {
+        return Error::None;
+    }
+    auto intError = mComposer.setLayerType(mDisplayId, mId, type);
+    Error error = static_cast<Error>(intError);
+    if (error != Error::None) {
+        return error;
+    }
+    mType = type;
+    return error;
 }
 
 // Composer HAL 2.3

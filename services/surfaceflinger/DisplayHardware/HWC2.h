@@ -170,6 +170,10 @@ public:
                 }
                 return *this;
             }
+            Builder& setSmartPanel(bool smart_panel) {
+                mConfig->mSmartPanel = smart_panel;
+                return *this;
+            }
 
         private:
             float getDefaultDensity();
@@ -184,6 +188,7 @@ public:
         nsecs_t getVsyncPeriod() const { return mVsyncPeriod; }
         float getDpiX() const { return mDpiX; }
         float getDpiY() const { return mDpiY; }
+        bool hasSmartPanel() const { return mSmartPanel; }
 
     private:
         Config(Display& display, hwc2_config_t id);
@@ -196,6 +201,7 @@ public:
         nsecs_t mVsyncPeriod;
         float mDpiX;
         float mDpiY;
+        bool mSmartPanel;
     };
 
     virtual hwc2_display_t getId() const = 0;
@@ -264,6 +270,7 @@ public:
             uint32_t* outNumTypes, uint32_t* outNumRequests,
             android::sp<android::Fence>* outPresentFence, uint32_t* state) = 0;
     [[clang::warn_unused_result]] virtual Error setDisplayBrightness(float brightness) const = 0;
+    [[clang::warn_unused_result]] virtual Error setDisplayElapseTime(uint64_t timeStamp) = 0;
 };
 
 namespace impl {
@@ -323,6 +330,7 @@ public:
     Error presentOrValidate(uint32_t* outNumTypes, uint32_t* outNumRequests,
                             android::sp<android::Fence>* outPresentFence, uint32_t* state) override;
     Error setDisplayBrightness(float brightness) const override;
+    Error setDisplayElapseTime(uint64_t timeStamp) override;
 
     // Other Display methods
     hwc2_display_t getId() const override { return mId; }
@@ -355,7 +363,7 @@ private:
     bool mIsConnected;
     DisplayType mType;
     std::unordered_map<hwc2_layer_t, std::unique_ptr<Layer>> mLayers;
-    std::unordered_map<hwc2_config_t, std::shared_ptr<const Config>> mConfigs;
+    std::map<hwc2_config_t, std::shared_ptr<const Config>> mConfigs;
     std::once_flag mDisplayCapabilityQueryFlag;
     std::unordered_set<DisplayCapability> mDisplayCapabilities;
 };
@@ -388,6 +396,7 @@ public:
     [[clang::warn_unused_result]] virtual Error setVisibleRegion(const android::Region& region) = 0;
     [[clang::warn_unused_result]] virtual Error setZOrder(uint32_t z) = 0;
     [[clang::warn_unused_result]] virtual Error setInfo(uint32_t type, uint32_t appId) = 0;
+    [[clang::warn_unused_result]] virtual Error setType(uint32_t type) = 0;
 
     // Composer HAL 2.3
     [[clang::warn_unused_result]] virtual Error setColorTransform(const android::mat4& matrix) = 0;
@@ -425,6 +434,7 @@ public:
     Error setVisibleRegion(const android::Region& region) override;
     Error setZOrder(uint32_t z) override;
     Error setInfo(uint32_t type, uint32_t appId) override;
+    Error setType(uint32_t type) override;
 
     // Composer HAL 2.3
     Error setColorTransform(const android::mat4& matrix) override;
@@ -447,6 +457,7 @@ private:
     android::HdrMetadata mHdrMetadata;
     android::mat4 mColorMatrix;
     uint32_t mBufferSlot;
+    uint32_t mType;
 };
 
 } // namespace impl
