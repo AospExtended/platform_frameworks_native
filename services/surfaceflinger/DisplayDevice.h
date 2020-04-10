@@ -64,6 +64,12 @@ public:
     constexpr static float sDefaultMinLumiance = 0.0;
     constexpr static float sDefaultMaxLumiance = 500.0;
 
+    // region in layer-stack space
+    mutable Region dirtyRegion;
+    // region in screen space
+    Region undefinedRegion;
+    bool lastCompositionHadVisibleLayers;
+
     enum {
         NO_LAYER_STACK = 0xFFFFFFFF,
     };
@@ -151,6 +157,15 @@ public:
     int getActiveConfig() const;
     void setActiveConfig(int mode);
 
+    // PowerMode Override Config
+    void setPowerModeOverrideConfig(bool supported);
+    bool getPowerModeOverrideConfig() const;
+
+    // For animation hint
+    bool getAnimating() const;
+    void setAnimating(bool isAnimating);
+    bool getIsDisplayBuiltInType() const;
+    void setIsDisplayBuiltInType(bool isBuiltIn);
     // release HWC resources (if any) for removable displays
     void disconnect();
 
@@ -202,6 +217,12 @@ private:
 
     // TODO(b/74619554): Remove special cases for primary display.
     const bool mIsPrimary;
+
+    // PowerMode Override
+    bool mIsPowerModeOverride;
+    // For animation hint
+    bool mIsAnimating;
+    bool mIsDisplayBuiltInType;
 };
 
 struct DisplayDeviceState {

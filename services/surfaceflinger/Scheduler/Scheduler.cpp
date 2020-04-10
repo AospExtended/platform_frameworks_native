@@ -245,7 +245,7 @@ void Scheduler::disableHardwareVsync(bool makeUnavailable) {
     }
 }
 
-void Scheduler::resyncToHardwareVsync(bool makeAvailable, nsecs_t period) {
+void Scheduler::resyncToHardwareVsync(bool makeAvailable, nsecs_t period, bool force_resync) {
     {
         std::lock_guard<std::mutex> lock(mHWVsyncLock);
         if (makeAvailable) {
@@ -261,7 +261,7 @@ void Scheduler::resyncToHardwareVsync(bool makeAvailable, nsecs_t period) {
         return;
     }
 
-    setVsyncPeriod(period);
+    setVsyncPeriod(period, force_resync);
 }
 
 ResyncCallback Scheduler::makeResyncCallback(GetVsyncPeriod&& getVsyncPeriod) {
@@ -277,10 +277,13 @@ void Scheduler::VsyncState::resync(const GetVsyncPeriod& getVsyncPeriod) {
     static constexpr nsecs_t kIgnoreDelay = ms2ns(750);
 
     const nsecs_t now = systemTime();
-    const nsecs_t last = lastResyncTime.exchange(now);
+    const nsecs_t last = lastResyncTime;
 
     if (now - last > kIgnoreDelay) {
+        ATRACE_BEGIN("scheduler.resyncToHardwareVsync");
         scheduler.resyncToHardwareVsync(false, getVsyncPeriod());
+        lastResyncTime.exchange(now);
+        ATRACE_END();
     }
 }
 
@@ -288,11 +291,11 @@ void Scheduler::setRefreshSkipCount(int count) {
     mPrimaryDispSync->setRefreshSkipCount(count);
 }
 
-void Scheduler::setVsyncPeriod(const nsecs_t period) {
+void Scheduler::setVsyncPeriod(const nsecs_t period, bool force_resync) {
     std::lock_guard<std::mutex> lock(mHWVsyncLock);
     mPrimaryDispSync->setPeriod(period);
 
-    if (!mPrimaryHWVsyncEnabled) {
+    if (!mPrimaryHWVsyncEnabled || force_resync) {
         mPrimaryDispSync->beginResync();
         mEventControlThread->setVsyncEnabled(true);
         mPrimaryHWVsyncEnabled = true;
@@ -340,7 +343,7 @@ std::unique_ptr<scheduler::LayerHistory::LayerHandle> Scheduler::registerLayer(
         std::string const& name, int windowType) {
     RefreshRateType refreshRateType = (windowType == InputWindowInfo::TYPE_WALLPAPER)
             ? RefreshRateType::DEFAULT
-            : RefreshRateType::PERFORMANCE;
+            : mRefreshRateConfigs.getMaxPerfRefreshRateType();
 
     const auto refreshRate = mRefreshRateConfigs.getRefreshRate(refreshRateType);
     const uint32_t performanceFps = (refreshRate) ? refreshRate->fps : 0;
@@ -561,9 +564,9 @@ Scheduler::RefreshRateType Scheduler::calculateRefreshRateType() {
         return RefreshRateType::DEFAULT;
     }
 
-    // If content detection is off we choose performance as we don't know the content fps
+    // If content detection is off we choose the Max Allowed Perf Refresh Rate type.
     if (mCurrentContentFeatureState == ContentFeatureState::CONTENT_DETECTION_OFF) {
-        return RefreshRateType::PERFORMANCE;
+        return mRefreshRateConfigs.getMaxPerfRefreshRateType();
     }
 
     // Content detection is on, find the appropriate refresh rate with minimal error

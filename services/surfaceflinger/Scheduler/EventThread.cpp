@@ -16,6 +16,7 @@
 
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
+#include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/types.h>
@@ -193,12 +194,20 @@ EventThread::EventThread(VSyncSource* src, std::unique_ptr<VSyncSource> uniqueSr
     }
 
     set_sched_policy(tid, SP_FOREGROUND);
+    mDolphinHandle = dlopen("libdolphin.so", RTLD_NOW);
+    if (!mDolphinHandle) {
+        ALOGW("Unable to open libdolphin.so: %s.", dlerror());
+    } else {
+        mDolphinCheck = (bool (*) (const char*))dlsym(mDolphinHandle, "dolphinCheck");
+        if (!mDolphinCheck) dlclose(mDolphinHandle);
+    }
 
     android_set_rt_ioprio(tid, 1);
 }
 
 EventThread::~EventThread() {
     mVSyncSource->setCallback(nullptr);
+    if(mDolphinCheck)dlclose(mDolphinHandle);
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -344,6 +353,7 @@ void EventThread::threadMain(std::unique_lock<std::mutex>& lock) {
 
         bool vsyncRequested = false;
 
+        int aliveCount = 0;
         // Find connections that should consume this event.
         auto it = mDisplayEventConnections.begin();
         while (it != mDisplayEventConnections.end()) {
@@ -352,11 +362,25 @@ void EventThread::threadMain(std::unique_lock<std::mutex>& lock) {
 
                 if (event && shouldConsumeEvent(*event, connection)) {
                     consumers.push_back(connection);
+                    if (mDolphinCheck)
+                        aliveCount++;
                 }
 
                 ++it;
             } else {
                 it = mDisplayEventConnections.erase(it);
+            }
+        }
+        if (mDolphinCheck) {
+            if (event && aliveCount == 0 && mDolphinCheck(mThreadName)) {
+                auto it = mDisplayEventConnections.begin();
+                while (it != mDisplayEventConnections.end() && aliveCount == 0) {
+                    if (const auto connection = it->promote()) {
+                        consumers.push_back(connection);
+                        aliveCount++;
+                        mVSyncSource->setVSyncEnabled(false);
+                    }
+                }
             }
         }
 
