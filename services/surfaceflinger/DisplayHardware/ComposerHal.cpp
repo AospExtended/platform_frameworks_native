@@ -26,14 +26,18 @@
 #include <gui/BufferQueue.h>
 #include <hidl/HidlTransportSupport.h>
 #include <hidl/HidlTransportUtils.h>
+#ifdef QCOM_UM_FAMILY
 #include <vendor/qti/hardware/display/composer/2.1/IQtiComposerClient.h>
+#endif
 
 namespace android {
 
 using hardware::Return;
 using hardware::hidl_vec;
 using hardware::hidl_handle;
+#ifdef QCOM_UM_FAMILY
 using vendor::qti::hardware::display::composer::V2_1::IQtiComposerClient;
+#endif
 
 namespace Hwc2 {
 
@@ -132,22 +136,26 @@ void Composer::CommandWriter::setLayerInfo(uint32_t type, uint32_t appId)
 
 void Composer::CommandWriter::setLayerType(uint32_t type)
 {
+#ifdef QCOM_UM_FAMILY
     constexpr uint16_t kSetLayerTypeLength = 1;
     beginCommand(static_cast<V2_1::IComposerClient::Command>(
                          IQtiComposerClient::Command::SET_LAYER_TYPE),
                  kSetLayerTypeLength);
     write(type);
     endCommand();
+#endif
 }
 
 void Composer::CommandWriter::setDisplayElapseTime(uint64_t time)
 {
+#ifdef QCOM_UM_FAMILY
     constexpr uint16_t kSetDisplayElapseTimeLength = 2;
     beginCommand(static_cast<V2_1::IComposerClient::Command>(
                          IQtiComposerClient::Command::SET_DISPLAY_ELAPSE_TIME),
                  kSetDisplayElapseTimeLength);
     write64(time);
     endCommand();
+#endif
 }
 
 void Composer::CommandWriter::setClientTargetMetadata(
@@ -865,6 +873,7 @@ Error Composer::setLayerInfo(Display display, Layer layer, uint32_t type,
 
 Error Composer::setLayerType(Display display, Layer layer, uint32_t type)
 {
+#ifdef QCOM_UM_FAMILY
     if (mClient_2_3) {
         if (sp<IQtiComposerClient> qClient = IQtiComposerClient::castFrom(mClient_2_3)) {
             mWriter.selectDisplay(display);
@@ -872,6 +881,7 @@ Error Composer::setLayerType(Display display, Layer layer, uint32_t type)
             mWriter.setLayerType(type);
         }
     }
+#endif
 
     return Error::NONE;
 }
