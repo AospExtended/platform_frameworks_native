@@ -20,6 +20,7 @@
 #include <array>
 #include <vector>
 
+#include <ui/GraphicTypes.h>
 #include <ui/Region.h>
 
 #define HWC2_INCLUDE_STRINGIFICATION
@@ -170,7 +171,7 @@ class Hwc2TestColor;
 
 class Hwc2TestBlendMode : public Hwc2TestProperty<hwc2_blend_mode_t> {
 public:
-    Hwc2TestBlendMode(Hwc2TestCoverage coverage);
+    explicit Hwc2TestBlendMode(Hwc2TestCoverage coverage);
 
     std::string dump() const override;
 
@@ -191,8 +192,8 @@ protected:
 
 class Hwc2TestColor : public Hwc2TestProperty<hwc_color_t> {
 public:
-    Hwc2TestColor(Hwc2TestCoverage coverage,
-            hwc2_blend_mode_t blendMode = HWC2_BLEND_MODE_NONE);
+    explicit Hwc2TestColor(Hwc2TestCoverage coverage,
+                           hwc2_blend_mode_t blendMode = HWC2_BLEND_MODE_NONE);
 
     std::string dump() const override;
 
@@ -216,7 +217,7 @@ protected:
 
 class Hwc2TestComposition : public Hwc2TestProperty<hwc2_composition_t> {
 public:
-    Hwc2TestComposition(Hwc2TestCoverage coverage);
+    explicit Hwc2TestComposition(Hwc2TestCoverage coverage);
 
     std::string dump() const override;
 
@@ -229,33 +230,34 @@ protected:
 };
 
 
-class Hwc2TestDataspace : public Hwc2TestProperty<android_dataspace_t> {
+class Hwc2TestDataspace : public Hwc2TestProperty<android::ui::Dataspace> {
 public:
-    Hwc2TestDataspace(Hwc2TestCoverage coverage);
+    explicit Hwc2TestDataspace(Hwc2TestCoverage coverage);
 
     std::string dump() const override;
 
 protected:
-    static const std::vector<android_dataspace_t> defaultDataspaces;
-    static const std::vector<android_dataspace_t> basicDataspaces;
-    static const std::vector<android_dataspace_t> completeDataspaces;
+    static const std::vector<android::ui::Dataspace> defaultDataspaces;
+    static const std::vector<android::ui::Dataspace> basicDataspaces;
+    static const std::vector<android::ui::Dataspace> completeDataspaces;
 
     static const std::array<bool, 6> mCompositionSupport;
 };
 
+class Hwc2TestVirtualBuffer;
 
 class Hwc2TestDisplayDimension : public Hwc2TestProperty<UnsignedArea> {
 public:
-    Hwc2TestDisplayDimension(Hwc2TestCoverage coverage);
+    explicit Hwc2TestDisplayDimension(Hwc2TestCoverage coverage);
 
     std::string dump() const;
 
-    void setDependent(Hwc2TestBuffer* buffer);
+    void setDependent(Hwc2TestVirtualBuffer* buffer);
 
 private:
     void updateDependents();
 
-    Hwc2TestBuffer* mBuffer;
+    std::set<Hwc2TestVirtualBuffer*> mBuffers;
 
     static const std::vector<UnsignedArea> mDefaultDisplayDimensions;
     static const std::vector<UnsignedArea> mBasicDisplayDimensions;
@@ -289,7 +291,7 @@ protected:
 
 class Hwc2TestPlaneAlpha : public Hwc2TestProperty<float> {
 public:
-    Hwc2TestPlaneAlpha(Hwc2TestCoverage coverage);
+    explicit Hwc2TestPlaneAlpha(Hwc2TestCoverage coverage);
 
     std::string dump() const override;
 
@@ -304,7 +306,7 @@ protected:
 
 class Hwc2TestSourceCrop : public Hwc2TestProperty<hwc_frect_t> {
 public:
-    Hwc2TestSourceCrop(Hwc2TestCoverage coverage, const Area& bufferArea = {0, 0});
+    explicit Hwc2TestSourceCrop(Hwc2TestCoverage coverage, const Area& bufferArea = {0, 0});
 
     std::string dump() const override;
 
@@ -328,7 +330,7 @@ protected:
 
 class Hwc2TestSurfaceDamage : public Hwc2TestProperty<hwc_region_t> {
 public:
-    Hwc2TestSurfaceDamage(Hwc2TestCoverage coverage);
+    explicit Hwc2TestSurfaceDamage(Hwc2TestCoverage coverage);
     ~Hwc2TestSurfaceDamage();
 
     std::string dump() const override;
@@ -354,7 +356,7 @@ protected:
 
 class Hwc2TestTransform : public Hwc2TestProperty<hwc_transform_t> {
 public:
-    Hwc2TestTransform(Hwc2TestCoverage coverage);
+    explicit Hwc2TestTransform(Hwc2TestCoverage coverage);
 
     std::string dump() const override;
 

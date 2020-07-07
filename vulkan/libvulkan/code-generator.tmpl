@@ -419,7 +419,7 @@ bool InitDriverTable(VkDevice dev, PFN_vkGetDeviceProcAddr get_proc,
     INIT_PROC(§
   {{end}}
 
-  {{if GetAnnotation $ "optional"}}false{{else}}true{{end}}, §
+  {{if GetAnnotation $ "optional"}}false{{else if GetAnnotation $ "vulkan1_1"}}false{{else}}true{{end}}, §
 
   {{if (Macro "IsInstanceDispatched" $)}}
     instance, §
@@ -702,6 +702,8 @@ VK_KHR_get_surface_capabilities2
 {{define "driver.KnownExtensions"}}
 {{Macro "driver.InterceptedExtensions"}}
 VK_KHR_get_physical_device_properties2
+VK_ANDROID_external_memory_android_hardware_buffer
+VK_KHR_bind_memory2
 {{end}}
 
 
@@ -733,7 +735,9 @@ VK_KHR_get_physical_device_properties2
     {{     if eq $.Name "vkCreateInstance"}}true
     {{else if eq $.Name "vkCreateDevice"}}true
     {{else if eq $.Name "vkEnumeratePhysicalDevices"}}true
+    {{else if eq $.Name "vkEnumeratePhysicalDeviceGroups"}}true
     {{else if eq $.Name "vkGetDeviceQueue"}}true
+    {{else if eq $.Name "vkGetDeviceQueue2"}}true
     {{else if eq $.Name "vkAllocateCommandBuffers"}}true
 
     {{/* Destroy functions of dispatchable objects */}}
@@ -747,6 +751,9 @@ VK_KHR_get_physical_device_properties2
     {{else if eq $.Name "vkGetInstanceProcAddr"}}true
     {{else if eq $.Name "vkGetDeviceProcAddr"}}true
 
+    {{/* VK_KHR_swapchain v69 requirement */}}
+    {{else if eq $.Name "vkBindImageMemory2"}}true
+    {{else if eq $.Name "vkBindImageMemory2KHR"}}true
     {{end}}
 
     {{$ext := GetAnnotation $ "extension"}}
@@ -754,6 +761,19 @@ VK_KHR_get_physical_device_properties2
       {{Macro "driver.IsExtensionIntercepted" $ext}}
     {{end}}
 
+  {{end}}
+{{end}}
+
+
+
+{{/*
+------------------------------------------------------------------------------
+  Emits the ProcHook enum for core Vulkan API verions.
+------------------------------------------------------------------------------
+*/}}
+{{define "driver.GetProcHookEnum"}}
+  {{if GetAnnotation $ "vulkan1_1"}}ProcHook::EXTENSION_CORE_1_1
+  {{else}}ProcHook::EXTENSION_CORE_1_0
   {{end}}
 {{end}}
 
@@ -771,6 +791,8 @@ VK_KHR_get_physical_device_properties2
     {{if $ext}}
       {{if not (Macro "IsExtensionInternal" $ext)}}true{{end}}
     {{end}}
+
+    {{if GetAnnotation $ "vulkan1_1"}}true{{end}}
   {{end}}
 {{end}}
 
@@ -794,7 +816,8 @@ VK_KHR_get_physical_device_properties2
           {{TrimPrefix "VK_" $e}},
         {{end}}
         ¶
-        EXTENSION_CORE, // valid bit
+        EXTENSION_CORE_1_0,
+        EXTENSION_CORE_1_1,
         EXTENSION_COUNT,
         EXTENSION_UNKNOWN,
       };
@@ -831,14 +854,21 @@ VK_KHR_get_physical_device_properties2
   {{AssertType $ "Function"}}
 
   {{if (Macro "driver.NeedProcHookStub" $)}}
+    {{$ext_name := Strings ("")}}
+    {{$ext_hook := Strings ("")}}
     {{$ext := GetAnnotation $ "extension"}}
-    {{$ext_name := index $ext.Arguments 0}}
+    {{if $ext}}
+      {{$ext_name = index $ext.Arguments 0}}
+      {{$ext_hook = Strings ("ProcHook::") (Macro "BaseName" $ext)}}
+    {{else}}
+      {{$ext_name = Strings ("VK_VERSION_1_0")}}
+      {{$ext_hook = (Macro "driver.GetProcHookEnum" $)}}
+    {{end}}
 
     {{$base := (Macro "BaseName" $)}}
 
     VKAPI_ATTR {{Node "Type" $.Return}} checked{{$base}}({{Macro "Parameters" $}}) {
       {{$p0 := index $.CallParameters 0}}
-      {{$ext_hook := Strings ("ProcHook::") (Macro "BaseName" $ext)}}
 
       if (GetData({{$p0.Name}}).hook_extensions[{{$ext_hook}}]) {
         {{if not (IsVoid $.Return.Type)}}return §{{end}}
@@ -871,7 +901,7 @@ VK_KHR_get_physical_device_properties2
   {
     "{{$.Name}}",
     ProcHook::GLOBAL,
-    ProcHook::EXTENSION_CORE,
+    {{Macro "driver.GetProcHookEnum" $}},
     reinterpret_cast<PFN_vkVoidFunction>({{$base}}),
     nullptr,
   },
@@ -904,7 +934,7 @@ VK_KHR_get_physical_device_properties2
         nullptr,
       {{end}}
     {{else}}
-      ProcHook::EXTENSION_CORE,
+      {{Macro "driver.GetProcHookEnum" $}},
       reinterpret_cast<PFN_vkVoidFunction>({{$base}}),
       nullptr,
     {{end}}
@@ -927,18 +957,23 @@ VK_KHR_get_physical_device_properties2
     ProcHook::DEVICE,
 
     {{$ext := GetAnnotation $ "extension"}}
-    {{if $ext}}
-      ProcHook::{{Macro "BaseName" $ext}},
-
-      {{if (Macro "IsExtensionInternal" $ext)}}
-        nullptr,
-        nullptr,
+    {{if or $ext (GetAnnotation $ "vulkan1_1")}}
+      {{if $ext}}
+        ProcHook::{{Macro "BaseName" $ext}},
+        {{if Macro "IsExtensionInternal" $ext}}
+          nullptr,
+          nullptr,
+        {{else}}
+          reinterpret_cast<PFN_vkVoidFunction>({{$base}}),
+          reinterpret_cast<PFN_vkVoidFunction>(checked{{$base}}),
+        {{end}}
       {{else}}
+        {{Macro "driver.GetProcHookEnum" $}},
         reinterpret_cast<PFN_vkVoidFunction>({{$base}}),
         reinterpret_cast<PFN_vkVoidFunction>(checked{{$base}}),
       {{end}}
     {{else}}
-      ProcHook::EXTENSION_CORE,
+      {{Macro "driver.GetProcHookEnum" $}},
       reinterpret_cast<PFN_vkVoidFunction>({{$base}}),
       nullptr,
     {{end}}
@@ -958,6 +993,7 @@ VK_KHR_get_physical_device_properties2
     {{/* Create functions of dispatchable objects */}}
     {{     if eq $.Name "vkCreateDevice"}}true
     {{else if eq $.Name "vkGetDeviceQueue"}}true
+    {{else if eq $.Name "vkGetDeviceQueue2"}}true
     {{else if eq $.Name "vkAllocateCommandBuffers"}}true
 
     {{/* Destroy functions of dispatchable objects */}}
@@ -969,6 +1005,7 @@ VK_KHR_get_physical_device_properties2
 
     {{/* We cache physical devices in loader.cpp */}}
     {{else if eq $.Name "vkEnumeratePhysicalDevices"}}true
+    {{else if eq $.Name "vkEnumeratePhysicalDeviceGroups"}}true
 
     {{else if eq $.Name "vkGetInstanceProcAddr"}}true
     {{else if eq $.Name "vkGetDeviceProcAddr"}}true
@@ -978,7 +1015,12 @@ VK_KHR_get_physical_device_properties2
     {{else if eq $.Name "vkDestroyImage"}}true
 
     {{else if eq $.Name "vkGetPhysicalDeviceProperties"}}true
+    {{else if eq $.Name "vkGetPhysicalDeviceProperties2"}}true
     {{else if eq $.Name "vkGetPhysicalDeviceProperties2KHR"}}true
+
+    {{/* VK_KHR_swapchain v69 requirement */}}
+    {{else if eq $.Name "vkBindImageMemory2"}}true
+    {{else if eq $.Name "vkBindImageMemory2KHR"}}true
     {{end}}
 
     {{$ext := GetAnnotation $ "extension"}}
@@ -1135,13 +1177,15 @@ VK_KHR_get_physical_device_properties2
   {{else if eq $ext "VK_KHR_xlib_surface"}}true
   {{else if eq $ext "VK_KHR_wayland_surface"}}true
   {{else if eq $ext "VK_KHR_win32_surface"}}true
-  {{else if eq $ext "VK_KHX_external_memory_win32"}}true
-  {{else if eq $ext "VK_KHX_win32_keyed_mutex"}}true
-  {{else if eq $ext "VK_KHX_external_semaphore_win32"}}true
+  {{else if eq $ext "VK_KHR_external_memory_win32"}}true
+  {{else if eq $ext "VK_KHR_win32_keyed_mutex"}}true
+  {{else if eq $ext "VK_KHR_external_semaphore_win32"}}true
+  {{else if eq $ext "VK_KHR_external_fence_win32"}}true
   {{else if eq $ext "VK_EXT_acquire_xlib_display"}}true
   {{else if eq $ext "VK_EXT_direct_mode_display"}}true
   {{else if eq $ext "VK_EXT_display_surface_counter"}}true
   {{else if eq $ext "VK_EXT_display_control"}}true
+  {{else if eq $ext "VK_FUCHSIA_imagepipe_surface"}}true
   {{else if eq $ext "VK_MVK_ios_surface"}}true
   {{else if eq $ext "VK_MVK_macos_surface"}}true
   {{else if eq $ext "VK_NN_vi_surface"}}true
@@ -1155,7 +1199,6 @@ VK_KHR_get_physical_device_properties2
 ------------------------------------------------------------------------------
   Reports whether an extension has functions exported by the loader.
   E.g. applications can directly link to an extension function.
-  Currently only support WSI extensions this way.
 ------------------------------------------------------------------------------
 */}}
 {{define "IsExtensionExported"}}
@@ -1163,6 +1206,7 @@ VK_KHR_get_physical_device_properties2
   {{     if eq $ext "VK_KHR_surface"}}true
   {{else if eq $ext "VK_KHR_swapchain"}}true
   {{else if eq $ext "VK_KHR_android_surface"}}true
+  {{else if eq $ext "VK_ANDROID_external_memory_android_hardware_buffer"}}true
   {{end}}
 {{end}}
 

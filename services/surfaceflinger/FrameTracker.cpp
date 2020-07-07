@@ -19,6 +19,7 @@
 
 #include <inttypes.h>
 
+#include <android-base/stringprintf.h>
 #include <android/log.h>
 #include <utils/String8.h>
 
@@ -82,17 +83,17 @@ void FrameTracker::advanceFrame() {
     mFrameRecords[mOffset].frameReadyTime = INT64_MAX;
     mFrameRecords[mOffset].actualPresentTime = INT64_MAX;
 
-    if (mFrameRecords[mOffset].frameReadyFence != NULL) {
+    if (mFrameRecords[mOffset].frameReadyFence != nullptr) {
         // We're clobbering an unsignaled fence, so we need to decrement the
         // fence count.
-        mFrameRecords[mOffset].frameReadyFence = NULL;
+        mFrameRecords[mOffset].frameReadyFence = nullptr;
         mNumFences--;
     }
 
-    if (mFrameRecords[mOffset].actualPresentFence != NULL) {
+    if (mFrameRecords[mOffset].actualPresentFence != nullptr) {
         // We're clobbering an unsignaled fence, so we need to decrement the
         // fence count.
-        mFrameRecords[mOffset].actualPresentFence = NULL;
+        mFrameRecords[mOffset].actualPresentFence = nullptr;
         mNumFences--;
     }
 }
@@ -153,10 +154,10 @@ void FrameTracker::processFencesLocked() const {
         bool updated = false;
 
         const std::shared_ptr<FenceTime>& rfence = records[idx].frameReadyFence;
-        if (rfence != NULL) {
+        if (rfence != nullptr) {
             records[idx].frameReadyTime = rfence->getSignalTime();
             if (records[idx].frameReadyTime < INT64_MAX) {
-                records[idx].frameReadyFence = NULL;
+                records[idx].frameReadyFence = nullptr;
                 numFences--;
                 updated = true;
             }
@@ -164,10 +165,10 @@ void FrameTracker::processFencesLocked() const {
 
         const std::shared_ptr<FenceTime>& pfence =
                 records[idx].actualPresentFence;
-        if (pfence != NULL) {
+        if (pfence != nullptr) {
             records[idx].actualPresentTime = pfence->getSignalTime();
             if (records[idx].actualPresentTime < INT64_MAX) {
-                records[idx].actualPresentFence = NULL;
+                records[idx].actualPresentFence = nullptr;
                 numFences--;
                 updated = true;
             }
@@ -230,17 +231,17 @@ bool FrameTracker::isFrameValidLocked(size_t idx) const {
             mFrameRecords[idx].actualPresentTime < INT64_MAX;
 }
 
-void FrameTracker::dumpStats(String8& result) const {
+void FrameTracker::dumpStats(std::string& result) const {
     Mutex::Autolock lock(mMutex);
     processFencesLocked();
 
     const size_t o = mOffset;
     for (size_t i = 1; i < NUM_FRAME_RECORDS; i++) {
         const size_t index = (o+i) % NUM_FRAME_RECORDS;
-        result.appendFormat("%" PRId64 "\t%" PRId64 "\t%" PRId64 "\n",
-            mFrameRecords[index].desiredPresentTime,
-            mFrameRecords[index].actualPresentTime,
-            mFrameRecords[index].frameReadyTime);
+        base::StringAppendF(&result, "%" PRId64 "\t%" PRId64 "\t%" PRId64 "\n",
+                            mFrameRecords[index].desiredPresentTime,
+                            mFrameRecords[index].actualPresentTime,
+                            mFrameRecords[index].frameReadyTime);
     }
     result.append("\n");
 }

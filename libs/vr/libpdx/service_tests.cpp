@@ -51,22 +51,24 @@ MATCHER_P2(IoVecMatcher, ptr, size, "") {
 //             method(IoVecMatcher(IoVecArray{{ptr1, size1}, {ptr2, size2}})));
 using IoVecArray = std::vector<iovec>;
 MATCHER_P(IoVecMatcher, iovec_array, "") {
+  auto local_arg = arg;
   for (const iovec& item : iovec_array) {
-    if (arg->iov_base != item.iov_base || arg->iov_len != item.iov_len)
+    if (local_arg->iov_base != item.iov_base || local_arg->iov_len != item.iov_len)
       return false;
-    arg++;
+    local_arg++;
   }
   return true;
 }
 
 using IoVecData = std::vector<std::string>;
 MATCHER_P(IoVecDataMatcher, iovec_data, "") {
+  auto local_arg = arg;
   for (const std::string& item : iovec_data) {
-    std::string data{reinterpret_cast<const char*>(arg->iov_base),
-                     arg->iov_len};
+    std::string data{reinterpret_cast<const char*>(local_arg->iov_base),
+                     local_arg->iov_len};
     if (data != item)
       return false;
-    arg++;
+    local_arg++;
   }
   return true;
 }
@@ -180,8 +182,8 @@ TEST_F(ServiceTest, ConstructMessage) {
   EXPECT_EQ(kTestTid, message.GetThreadId());
   EXPECT_EQ(kTestCid, message.GetChannelId());
   EXPECT_EQ(kTestMid, message.GetMessageId());
-  EXPECT_EQ(kTestEuid, message.GetEffectiveUserId());
-  EXPECT_EQ(kTestEgid, message.GetEffectiveGroupId());
+  EXPECT_EQ((unsigned) kTestEuid, message.GetEffectiveUserId());
+  EXPECT_EQ((unsigned) kTestEgid, message.GetEffectiveGroupId());
   EXPECT_EQ(kTestOp, message.GetOp());
   EXPECT_EQ(service_, message.GetService());
   EXPECT_EQ(test_channel, message.GetChannel());

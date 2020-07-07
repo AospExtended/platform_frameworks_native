@@ -13,11 +13,18 @@
 // limitations under the License.
 
 ndk_headers {
-    name: "libnativewindow_headers",
+    name: "libnativewindow_ndk_headers",
     from: "include/android",
     to: "android",
     srcs: ["include/android/*.h"],
     license: "NOTICE",
+}
+
+// TODO(b/118715870): cleanup header files
+cc_library_headers {
+    name: "libnativewindow_headers",
+    export_include_dirs: ["include"],
+    vendor_available: true,
 }
 
 ndk_library {
@@ -30,13 +37,21 @@ ndk_library {
 
 cc_library {
     name: "libnativewindow",
-    export_include_dirs: ["include"],
+    export_include_dirs: [
+        "include",
+        "include-private",
+    ],
 
     clang: true,
 
-    cppflags: [
-        "-std=c++1z"
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-enum-compare",
+        "-Wno-unused-function",
     ],
+
+    version_script: "libnativewindow.map.txt",
 
     srcs: [
         "AHardwareBuffer.cpp",
@@ -49,7 +64,7 @@ cc_library {
         "liblog",
         "libutils",
         "libui",
-        "android.hardware.graphics.common@1.0",
+        "android.hardware.graphics.common@1.1",
     ],
 
     static_libs: [
@@ -57,10 +72,26 @@ cc_library {
         "libgrallocusage",
     ],
 
+    header_libs: [
+        "libnativebase_headers",
+        "libnativewindow_headers",
+    ],
+
     // headers we include in our public headers
     export_static_lib_headers: [
         "libarect",
     ],
+
+    export_header_lib_headers: [
+        "libnativebase_headers",
+    ],
+}
+
+llndk_library {
+    name: "libnativewindow",
+    symbol_file: "libnativewindow.map.txt",
+    unversioned: true,
+    export_include_dirs: ["include"],
 }
 
 subdirs = ["tests"]

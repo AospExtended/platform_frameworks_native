@@ -27,6 +27,7 @@
 
 #include <binder/Parcel.h>
 #include <binder/IInterface.h>
+#include <binder/IResultReceiver.h>
 
 #include <sensor/Sensor.h>
 #include <sensor/ISensorEventConnection.h>
@@ -63,7 +64,8 @@ public:
         Vector<Sensor> v;
         uint32_t n = reply.readUint32();
         v.setCapacity(n);
-        while (n--) {
+        while (n) {
+            n--;
             reply.read(s);
             v.add(s);
         }
@@ -80,7 +82,8 @@ public:
         Vector<Sensor> v;
         uint32_t n = reply.readUint32();
         v.setCapacity(n);
-        while (n--) {
+        while (n) {
+            n--;
             reply.read(s);
             v.add(s);
         }
@@ -119,10 +122,12 @@ public:
         return interface_cast<ISensorEventConnection>(reply.readStrongBinder());
     }
 
-    virtual int setOperationParameter(
-            int32_t type, const Vector<float> &floats, const Vector<int32_t> &ints) {
+    virtual int setOperationParameter(int32_t handle, int32_t type,
+                                      const Vector<float> &floats,
+                                      const Vector<int32_t> &ints) {
         Parcel data, reply;
         data.writeInterfaceToken(ISensorServer::getInterfaceDescriptor());
+        data.writeInt32(handle);
         data.writeInt32(type);
         data.writeUint32(static_cast<uint32_t>(floats.size()));
         for (auto i : floats) {
@@ -203,10 +208,12 @@ status_t BnSensorServer::onTransact(
         }
         case SET_OPERATION_PARAMETER: {
             CHECK_INTERFACE(ISensorServer, data, reply);
+            int32_t handle;
             int32_t type;
             Vector<float> floats;
             Vector<int32_t> ints;
 
+            handle = data.readInt32();
             type = data.readInt32();
             floats.resize(data.readUint32());
             for (auto &i : floats) {
@@ -217,8 +224,32 @@ status_t BnSensorServer::onTransact(
                 i = data.readInt32();
             }
 
-            int32_t ret = setOperationParameter(type, floats, ints);
+            int32_t ret = setOperationParameter(handle, type, floats, ints);
             reply->writeInt32(ret);
+            return NO_ERROR;
+        }
+        case SHELL_COMMAND_TRANSACTION: {
+            int in = data.readFileDescriptor();
+            int out = data.readFileDescriptor();
+            int err = data.readFileDescriptor();
+            int argc = data.readInt32();
+            Vector<String16> args;
+            for (int i = 0; i < argc && data.dataAvail() > 0; i++) {
+               args.add(data.readString16());
+            }
+            sp<IBinder> unusedCallback;
+            sp<IResultReceiver> resultReceiver;
+            status_t status;
+            if ((status = data.readNullableStrongBinder(&unusedCallback)) != NO_ERROR) {
+                return status;
+            }
+            if ((status = data.readNullableStrongBinder(&resultReceiver)) != NO_ERROR) {
+                return status;
+            }
+            status = shellCommand(in, out, err, args);
+            if (resultReceiver != nullptr) {
+                resultReceiver->send(status);
+            }
             return NO_ERROR;
         }
     }

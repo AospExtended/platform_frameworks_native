@@ -2,6 +2,7 @@
 #define ANDROID_PDX_UTILITY_H_
 
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 
 #include <pdx/rpc/sequence.h>
@@ -23,6 +24,7 @@ class ByteBuffer {
     if (other.size())
       memcpy(data_, other.data(), other.size());
   }
+  ~ByteBuffer() { std::free(data_); }
 
   ByteBuffer& operator=(const ByteBuffer& other) {
     resize(other.size());
@@ -31,7 +33,7 @@ class ByteBuffer {
     return *this;
   }
 
-  ByteBuffer& operator=(ByteBuffer&& other) {
+  ByteBuffer& operator=(ByteBuffer&& other) noexcept {
     std::swap(data_, other.data_);
     std::swap(size_, other.size_);
     std::swap(capacity_, other.capacity_);
@@ -69,7 +71,7 @@ class ByteBuffer {
     size |= size >> 8;
     size |= size >> 16;
     size++;
-    void* new_data = data_ ? realloc(data_, size) : malloc(size);
+    void* new_data = data_ ? std::realloc(data_, size) : std::malloc(size);
     // TODO(avakulenko): Check for allocation failures.
     data_ = static_cast<uint8_t*>(new_data);
     capacity_ = size;

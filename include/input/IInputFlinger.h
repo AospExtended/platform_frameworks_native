@@ -22,6 +22,9 @@
 
 #include <binder/IInterface.h>
 
+#include <input/InputWindow.h>
+#include <input/ISetInputWindowsListener.h>
+
 namespace android {
 
 /*
@@ -31,6 +34,11 @@ namespace android {
 class IInputFlinger : public IInterface {
 public:
     DECLARE_META_INTERFACE(InputFlinger)
+
+    virtual void setInputWindows(const std::vector<InputWindowInfo>& inputHandles,
+            const sp<ISetInputWindowsListener>& setInputWindowsListener) = 0;
+    virtual void registerInputChannel(const sp<InputChannel>& channel) = 0;
+    virtual void unregisterInputChannel(const sp<InputChannel>& channel) = 0;
 };
 
 
@@ -40,7 +48,9 @@ public:
 class BnInputFlinger : public BnInterface<IInputFlinger> {
 public:
     enum {
-        DO_SOMETHING_TRANSACTION = IBinder::FIRST_CALL_TRANSACTION,
+        SET_INPUT_WINDOWS_TRANSACTION = IBinder::FIRST_CALL_TRANSACTION,
+        REGISTER_INPUT_CHANNEL_TRANSACTION,
+        UNREGISTER_INPUT_CHANNEL_TRANSACTION
     };
 
     virtual status_t onTransact(uint32_t code, const Parcel& data,

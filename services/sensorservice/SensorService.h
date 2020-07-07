@@ -20,11 +20,16 @@
 #include "SensorList.h"
 #include "RecentEventLogger.h"
 
+#include <android-base/macros.h>
+#include <binder/AppOpsManager.h>
 #include <binder/BinderService.h>
+#include <binder/IUidObserver.h>
 #include <cutils/compiler.h>
+#include <cutils/multiuser.h>
 #include <sensor/ISensorServer.h>
 #include <sensor/ISensorEventConnection.h>
 #include <sensor/Sensor.h>
+#include "android/hardware/BnSensorPrivacyListener.h"
 
 #include <utils/AndroidThreads.h>
 #include <utils/KeyedVector.h>
@@ -38,6 +43,7 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #if __clang__
 // Clang warns about SensorEventConnection::dump hiding BBinder::dump. The cause isn't fixable
@@ -58,7 +64,6 @@
 namespace android {
 // ---------------------------------------------------------------------------
 class SensorInterface;
-using namespace SensorServiceUtil;
 
 class SensorService :
         public BinderService<SensorService>,
@@ -85,13 +90,133 @@ public:
     status_t flushSensor(const sp<SensorEventConnection>& connection,
                          const String16& opPackageName);
 
+
+    virtual status_t shellCommand(int in, int out, int err, Vector<String16>& args);
+
 private:
     friend class BinderService<SensorService>;
 
     // nested class/struct for internal use
-    class SensorRecord;
+    class ConnectionSafeAutolock;
+    class SensorConnectionHolder;
     class SensorEventAckReceiver;
+    class SensorRecord;
     class SensorRegistrationInfo;
+
+    // Promoting a SensorEventConnection or SensorDirectConnection from wp to sp must be done with
+    // mLock held, but destroying that sp must be done unlocked to avoid a race condition that
+    // causes a deadlock (remote dies while we hold a local sp, then our decStrong() call invokes
+    // the dtor -> cleanupConnection() tries to re-lock the mutex). This class ensures safe usage
+    // by wrapping a Mutex::Autolock on SensorService's mLock, plus vectors that hold promoted sp<>
+    // references until the lock is released, when they are safely destroyed.
+    // All read accesses to the connection lists in mConnectionHolder must be done via this class.
+    class ConnectionSafeAutolock final {
+    public:
+        // Returns a list of non-null promoted connection references
+        const std::vector<sp<SensorEventConnection>>& getActiveConnections();
+        const std::vector<sp<SensorDirectConnection>>& getDirectConnections();
+
+    private:
+        // Constructed via SensorConnectionHolder::lock()
+        friend class SensorConnectionHolder;
+        explicit ConnectionSafeAutolock(SensorConnectionHolder& holder, Mutex& mutex);
+        DISALLOW_IMPLICIT_CONSTRUCTORS(ConnectionSafeAutolock);
+
+        // NOTE: Order of these members is important, as the destructor for non-static members
+        // get invoked in the reverse order of their declaration. Here we are relying on the
+        // Autolock to be destroyed *before* the vectors, so the sp<> objects are destroyed without
+        // the lock held, which avoids the deadlock.
+        SensorConnectionHolder& mConnectionHolder;
+        std::vector<std::vector<sp<SensorEventConnection>>> mReferencedActiveConnections;
+        std::vector<std::vector<sp<SensorDirectConnection>>> mReferencedDirectConnections;
+        Mutex::Autolock mAutolock;
+
+        template<typename ConnectionType>
+        const std::vector<sp<ConnectionType>>& getConnectionsHelper(
+                const SortedVector<wp<ConnectionType>>& connectionList,
+                std::vector<std::vector<sp<ConnectionType>>>* referenceHolder);
+    };
+
+    // Encapsulates the collection of active SensorEventConection and SensorDirectConnection
+    // references. Write access is done through this class with mLock held, but all read access
+    // must be routed through ConnectionSafeAutolock.
+    class SensorConnectionHolder {
+    public:
+        void addEventConnectionIfNotPresent(const sp<SensorEventConnection>& connection);
+        void removeEventConnection(const wp<SensorEventConnection>& connection);
+
+        void addDirectConnection(const sp<SensorDirectConnection>& connection);
+        void removeDirectConnection(const wp<SensorDirectConnection>& connection);
+
+        // Pass in the mutex that protects this connection holder; acquires the lock and returns an
+        // object that can be used to safely read the lists of connections
+        ConnectionSafeAutolock lock(Mutex& mutex);
+
+    private:
+        friend class ConnectionSafeAutolock;
+        SortedVector< wp<SensorEventConnection> > mActiveConnections;
+        SortedVector< wp<SensorDirectConnection> > mDirectConnections;
+    };
+
+    // If accessing a sensor we need to make sure the UID has access to it. If
+    // the app UID is idle then it cannot access sensors and gets no trigger
+    // events, no on-change events, flush event behavior does not change, and
+    // recurring events are the same as the first one delivered in idle state
+    // emulating no sensor change. As soon as the app UID transitions to an
+    // active state we will start reporting events as usual and vise versa. This
+    // approach transparently handles observing sensors while the app UID transitions
+    // between idle/active state avoiding to get stuck in a state receiving sensor
+    // data while idle or not receiving sensor data while active.
+    class UidPolicy : public BnUidObserver {
+        public:
+            explicit UidPolicy(wp<SensorService> service)
+                    : mService(service) {}
+            void registerSelf();
+            void unregisterSelf();
+
+            bool isUidActive(uid_t uid);
+
+            void onUidGone(uid_t uid, bool disabled);
+            void onUidActive(uid_t uid);
+            void onUidIdle(uid_t uid, bool disabled);
+            void onUidStateChanged(uid_t uid __unused, int32_t procState __unused,
+                                   int64_t procStateSeq __unused) {}
+
+            void addOverrideUid(uid_t uid, bool active);
+            void removeOverrideUid(uid_t uid);
+        private:
+            bool isUidActiveLocked(uid_t uid);
+            void updateOverrideUid(uid_t uid, bool active, bool insert);
+
+            Mutex mUidLock;
+            wp<SensorService> mService;
+            std::unordered_set<uid_t> mActiveUids;
+            std::unordered_map<uid_t, bool> mOverrideUids;
+    };
+
+    // Sensor privacy allows a user to disable access to all sensors on the device. When
+    // enabled sensor privacy will prevent all apps, including active apps, from accessing
+    // sensors, they will not receive trigger nor on-change events, flush event behavior
+    // does not change, and recurring events are the same as the first one delivered when
+    // sensor privacy was enabled. All sensor direct connections will be stopped as well
+    // and new direct connections will not be allowed while sensor privacy is enabled.
+    // Once sensor privacy is disabled access to sensors will be restored for active
+    // apps, previously stopped direct connections will be restarted, and new direct
+    // connections will be allowed again.
+    class SensorPrivacyPolicy : public hardware::BnSensorPrivacyListener {
+        public:
+            explicit SensorPrivacyPolicy(wp<SensorService> service) : mService(service) {}
+            void registerSelf();
+            void unregisterSelf();
+
+            bool isSensorPrivacyEnabled();
+
+            binder::Status onSensorPrivacyChanged(bool enabled);
+
+        private:
+            wp<SensorService> mService;
+            std::atomic_bool mSensorPrivacyEnabled;
+    };
 
     enum Mode {
        // The regular operating mode where any application can register/unregister/call flush on
@@ -159,9 +284,8 @@ private:
     virtual sp<ISensorEventConnection> createSensorDirectConnection(const String16& opPackageName,
             uint32_t size, int32_t type, int32_t format, const native_handle *resource);
     virtual int setOperationParameter(
-            int32_t type, const Vector<float> &floats, const Vector<int32_t> &ints);
+            int32_t handle, int32_t type, const Vector<float> &floats, const Vector<int32_t> &ints);
     virtual status_t dump(int fd, const Vector<String16>& args);
-
     String8 getSensorName(int handle) const;
     bool isVirtualSensor(int handle) const;
     sp<SensorInterface> getSensorInterfaceFromHandle(int handle) const;
@@ -179,11 +303,13 @@ private:
             sensors_event_t const* buffer, const int count);
     static bool canAccessSensor(const Sensor& sensor, const char* operation,
             const String16& opPackageName);
+    static bool hasPermissionForSensor(const Sensor& sensor);
+    static int getTargetSdkVersion(const String16& opPackageName);
     // SensorService acquires a partial wakelock for delivering events from wake up sensors. This
     // method checks whether all the events from these wake up sensors have been delivered to the
     // corresponding applications, if yes the wakelock is released.
     void checkWakeLockState();
-    void checkWakeLockStateLocked();
+    void checkWakeLockStateLocked(ConnectionSafeAutolock* connLock);
     bool isWakeLockAcquired();
     bool isWakeUpSensorEvent(const sensors_event_t& event) const;
 
@@ -201,15 +327,11 @@ private:
     // Send events from the event cache for this particular connection.
     void sendEventsFromCache(const sp<SensorEventConnection>& connection);
 
-    // Promote all weak referecences in mActiveConnections vector to strong references and add them
-    // to the output vector.
-    void populateActiveConnections( SortedVector< sp<SensorEventConnection> >* activeConnections);
-
     // If SensorService is operating in RESTRICTED mode, only select whitelisted packages are
     // allowed to register for or call flush on sensors. Typically only cts test packages are
     // allowed.
     bool isWhiteListedPackage(const String8& packageName);
-    bool isOperationRestricted(const String16& opPackageName);
+    bool isOperationPermitted(const String16& opPackageName);
 
     // Reset the state of SensorService to NORMAL mode.
     status_t resetToNormalMode();
@@ -225,10 +347,29 @@ private:
     // Enable SCHED_FIFO priority for thread
     void enableSchedFifoMode();
 
+    // Sets whether the given UID can get sensor data
+    void setSensorAccess(uid_t uid, bool hasAccess);
+
+    // Overrides the UID state as if it is idle
+    status_t handleSetUidState(Vector<String16>& args, int err);
+    // Clears the override for the UID state
+    status_t handleResetUidState(Vector<String16>& args, int err);
+    // Gets the UID state
+    status_t handleGetUidState(Vector<String16>& args, int out, int err);
+    // Prints the shell command help
+    status_t printHelp(int out);
+
+    // temporarily stops all active direct connections and disables all sensors
+    void disableAllSensors();
+    void disableAllSensorsLocked(ConnectionSafeAutolock* connLock);
+    // restarts the previously stopped direct connections and enables all sensors
+    void enableAllSensors();
+    void enableAllSensorsLocked(ConnectionSafeAutolock* connLock);
+
     static uint8_t sHmacGlobalKey[128];
     static bool sHmacGlobalKeyIsValid;
 
-    SensorList mSensors;
+    SensorServiceUtil::SensorList mSensors;
     status_t mInitCheck;
 
     // Socket buffersize used to initialize BitTube. This size depends on whether batching is
@@ -241,12 +382,13 @@ private:
     mutable Mutex mLock;
     DefaultKeyedVector<int, SensorRecord*> mActiveSensors;
     std::unordered_set<int> mActiveVirtualSensors;
-    SortedVector< wp<SensorEventConnection> > mActiveConnections;
+    SensorConnectionHolder mConnectionHolder;
     bool mWakeLockAcquired;
     sensors_event_t *mSensorEventBuffer, *mSensorEventScratch;
+    // WARNING: these SensorEventConnection instances must not be promoted to sp, except via
+    // modification to add support for them in ConnectionSafeAutolock
     wp<const SensorEventConnection> * mMapFlushEventsToConnections;
-    std::unordered_map<int, RecentEventLogger*> mRecentEvent;
-    SortedVector< wp<SensorDirectConnection> > mDirectConnections;
+    std::unordered_map<int, SensorServiceUtil::RecentEventLogger*> mRecentEvent;
     Mode mCurrentOperatingMode;
 
     // This packagaName is set when SensorService is in RESTRICTED or DATA_INJECTION mode. Only
@@ -257,6 +399,13 @@ private:
 
     int mNextSensorRegIndex;
     Vector<SensorRegistrationInfo> mLastNSensorRegistrations;
+
+    sp<UidPolicy> mUidPolicy;
+    sp<SensorPrivacyPolicy> mSensorPrivacyPolicy;
+
+    static AppOpsManager sAppOpsManager;
+    static std::map<String16, int> sPackageTargetVersion;
+    static Mutex sPackageTargetVersionLock;
 };
 
 } // namespace android

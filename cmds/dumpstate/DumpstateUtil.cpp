@@ -30,7 +30,8 @@
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
-#include <cutils/log.h>
+#include <android-base/unique_fd.h>
+#include <log/log.h>
 
 #include "DumpstateInternal.h"
 
@@ -42,7 +43,7 @@ namespace {
 
 static constexpr const char* kSuPath = "/system/xbin/su";
 
-static bool waitpid_with_timeout(pid_t pid, int timeout_seconds, int* status) {
+static bool waitpid_with_timeout(pid_t pid, int timeout_ms, int* status) {
     sigset_t child_mask, old_mask;
     sigemptyset(&child_mask);
     sigaddset(&child_mask, SIGCHLD);
@@ -53,12 +54,13 @@ static bool waitpid_with_timeout(pid_t pid, int timeout_seconds, int* status) {
     }
 
     timespec ts;
-    ts.tv_sec = timeout_seconds;
-    ts.tv_nsec = 0;
-    int ret = TEMP_FAILURE_RETRY(sigtimedwait(&child_mask, NULL, &ts));
+    ts.tv_sec = MSEC_TO_SEC(timeout_ms);
+    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+    int ret = TEMP_FAILURE_RETRY(sigtimedwait(&child_mask, nullptr, &ts));
     int saved_errno = errno;
+
     // Set the signals back the way they were.
-    if (sigprocmask(SIG_SETMASK, &old_mask, NULL) == -1) {
+    if (sigprocmask(SIG_SETMASK, &old_mask, nullptr) == -1) {
         printf("*** sigprocmask failed: %s\n", strerror(errno));
         if (ret == 0) {
             return false;
@@ -90,7 +92,7 @@ static bool waitpid_with_timeout(pid_t pid, int timeout_seconds, int* status) {
 CommandOptions CommandOptions::DEFAULT = CommandOptions::WithTimeout(10).Build();
 CommandOptions CommandOptions::AS_ROOT = CommandOptions::WithTimeout(10).AsRoot().Build();
 
-CommandOptions::CommandOptionsBuilder::CommandOptionsBuilder(int64_t timeout) : values(timeout) {
+CommandOptions::CommandOptionsBuilder::CommandOptionsBuilder(int64_t timeout_ms) : values(timeout_ms) {
 }
 
 CommandOptions::CommandOptionsBuilder& CommandOptions::CommandOptionsBuilder::Always() {
@@ -99,7 +101,16 @@ CommandOptions::CommandOptionsBuilder& CommandOptions::CommandOptionsBuilder::Al
 }
 
 CommandOptions::CommandOptionsBuilder& CommandOptions::CommandOptionsBuilder::AsRoot() {
-    values.account_mode_ = SU_ROOT;
+    if (!PropertiesHelper::IsUnroot()) {
+        values.account_mode_ = SU_ROOT;
+    }
+    return *this;
+}
+
+CommandOptions::CommandOptionsBuilder& CommandOptions::CommandOptionsBuilder::AsRootIfAvailable() {
+    if (!PropertiesHelper::IsUserBuild()) {
+        return AsRoot();
+    }
     return *this;
 }
 
@@ -123,8 +134,8 @@ CommandOptions CommandOptions::CommandOptionsBuilder::Build() {
     return CommandOptions(values);
 }
 
-CommandOptions::CommandOptionsValues::CommandOptionsValues(int64_t timeout)
-    : timeout_(timeout),
+CommandOptions::CommandOptionsValues::CommandOptionsValues(int64_t timeout_ms)
+    : timeout_ms_(timeout_ms),
       always_(false),
       account_mode_(DONT_DROP_ROOT),
       output_mode_(NORMAL_OUTPUT),
@@ -135,7 +146,11 @@ CommandOptions::CommandOptions(const CommandOptionsValues& values) : values(valu
 }
 
 int64_t CommandOptions::Timeout() const {
-    return values.timeout_;
+    return MSEC_TO_SEC(values.timeout_ms_);
+}
+
+int64_t CommandOptions::TimeoutInMs() const {
+    return values.timeout_ms_;
 }
 
 bool CommandOptions::Always() const {
@@ -154,12 +169,17 @@ std::string CommandOptions::LoggingMessage() const {
     return values.logging_message_;
 }
 
-CommandOptions::CommandOptionsBuilder CommandOptions::WithTimeout(int64_t timeout) {
-    return CommandOptions::CommandOptionsBuilder(timeout);
+CommandOptions::CommandOptionsBuilder CommandOptions::WithTimeout(int64_t timeout_sec) {
+    return CommandOptions::CommandOptionsBuilder(SEC_TO_MSEC(timeout_sec));
+}
+
+CommandOptions::CommandOptionsBuilder CommandOptions::WithTimeoutInMs(int64_t timeout_ms) {
+    return CommandOptions::CommandOptionsBuilder(timeout_ms);
 }
 
 std::string PropertiesHelper::build_type_ = "";
 int PropertiesHelper::dry_run_ = -1;
+int PropertiesHelper::unroot_ = -1;
 
 bool PropertiesHelper::IsUserBuild() {
     if (build_type_.empty()) {
@@ -175,9 +195,16 @@ bool PropertiesHelper::IsDryRun() {
     return dry_run_ == 1;
 }
 
+bool PropertiesHelper::IsUnroot() {
+    if (unroot_ == -1) {
+        unroot_ = android::base::GetBoolProperty("dumpstate.unroot", false) ? 1 : 0;
+    }
+    return unroot_ == 1;
+}
+
 int DumpFileToFd(int out_fd, const std::string& title, const std::string& path) {
-    int fd = TEMP_FAILURE_RETRY(open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC));
-    if (fd < 0) {
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC)));
+    if (fd.get() < 0) {
         int err = errno;
         if (title.empty()) {
             dprintf(out_fd, "*** Error dumping %s: %s\n", path.c_str(), strerror(err));
@@ -188,7 +215,7 @@ int DumpFileToFd(int out_fd, const std::string& title, const std::string& path) 
         fsync(out_fd);
         return -1;
     }
-    return DumpFileFromFdToFd(title, path, fd, out_fd, PropertiesHelper::IsDryRun());
+    return DumpFileFromFdToFd(title, path, fd.get(), out_fd, PropertiesHelper::IsDryRun());
 }
 
 int RunCommandToFd(int fd, const std::string& title, const std::vector<std::string>& full_command,
@@ -294,7 +321,7 @@ int RunCommandToFd(int fd, const std::string& title, const std::vector<std::stri
         struct sigaction sigact;
         memset(&sigact, 0, sizeof(sigact));
         sigact.sa_handler = SIG_IGN;
-        sigaction(SIGPIPE, &sigact, NULL);
+        sigaction(SIGPIPE, &sigact, nullptr);
 
         execvp(path, (char**)args.data());
         // execvp's result will be handled after waitpid_with_timeout() below, but
@@ -307,7 +334,7 @@ int RunCommandToFd(int fd, const std::string& title, const std::vector<std::stri
 
     /* handle parent case */
     int status;
-    bool ret = waitpid_with_timeout(pid, options.Timeout(), &status);
+    bool ret = waitpid_with_timeout(pid, options.TimeoutInMs(), &status);
     fsync(fd);
 
     uint64_t elapsed = Nanotime() - start;
@@ -326,9 +353,9 @@ int RunCommandToFd(int fd, const std::string& title, const std::vector<std::stri
                    static_cast<float>(elapsed) / NANOS_PER_SEC, pid);
         }
         kill(pid, SIGTERM);
-        if (!waitpid_with_timeout(pid, 5, nullptr)) {
+        if (!waitpid_with_timeout(pid, 5000, nullptr)) {
             kill(pid, SIGKILL);
-            if (!waitpid_with_timeout(pid, 5, nullptr)) {
+            if (!waitpid_with_timeout(pid, 5000, nullptr)) {
                 if (!silent)
                     dprintf(fd, "could not kill command '%s' (pid %d) even with SIGKILL.\n",
                             command, pid);

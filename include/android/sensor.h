@@ -50,6 +50,7 @@
 
 #include <android/looper.h>
 
+#include <stdbool.h>
 #include <sys/types.h>
 #include <math.h>
 #include <stdint.h>
@@ -63,10 +64,16 @@ typedef struct AHardwareBuffer AHardwareBuffer;
 #define ASENSOR_RESOLUTION_INVALID     (nanf(""))
 #define ASENSOR_FIFO_COUNT_INVALID     (-1)
 #define ASENSOR_DELAY_INVALID          INT32_MIN
+#define ASENSOR_INVALID                (-1)
+
+/* (Keep in sync with hardware/sensors-base.h and Sensor.java.) */
 
 /**
  * Sensor types.
- * (keep in sync with hardware/sensors.h)
+ *
+ * See
+ * [android.hardware.SensorEvent#values](https://developer.android.com/reference/android/hardware/SensorEvent.html#values)
+ * for detailed explanations of the data returned for each of these types.
  */
 enum {
     /**
@@ -105,6 +112,12 @@ enum {
      */
     ASENSOR_TYPE_LIGHT               = 5,
     /**
+     * {@link ASENSOR_TYPE_PRESSURE}
+     *
+     * The pressure sensor value is returned in hPa (millibar).
+     */
+    ASENSOR_TYPE_PRESSURE            = 6,
+    /**
      * {@link ASENSOR_TYPE_PROXIMITY}
      * reporting-mode: on-change
      *
@@ -116,13 +129,122 @@ enum {
      */
     ASENSOR_TYPE_PROXIMITY           = 8,
     /**
+     * {@link ASENSOR_TYPE_GRAVITY}
+     *
+     * All values are in SI units (m/s^2) and measure the direction and
+     * magnitude of gravity. When the device is at rest, the output of
+     * the gravity sensor should be identical to that of the accelerometer.
+     */
+    ASENSOR_TYPE_GRAVITY             = 9,
+    /**
      * {@link ASENSOR_TYPE_LINEAR_ACCELERATION}
      * reporting-mode: continuous
      *
      *  All values are in SI units (m/s^2) and measure the acceleration of the
      *  device not including the force of gravity.
      */
-    ASENSOR_TYPE_LINEAR_ACCELERATION = 10
+    ASENSOR_TYPE_LINEAR_ACCELERATION = 10,
+    /**
+     * {@link ASENSOR_TYPE_ROTATION_VECTOR}
+     */
+    ASENSOR_TYPE_ROTATION_VECTOR     = 11,
+    /**
+     * {@link ASENSOR_TYPE_RELATIVE_HUMIDITY}
+     *
+     * The relative humidity sensor value is returned in percent.
+     */
+    ASENSOR_TYPE_RELATIVE_HUMIDITY   = 12,
+    /**
+     * {@link ASENSOR_TYPE_AMBIENT_TEMPERATURE}
+     *
+     * The ambient temperature sensor value is returned in Celcius.
+     */
+    ASENSOR_TYPE_AMBIENT_TEMPERATURE = 13,
+    /**
+     * {@link ASENSOR_TYPE_MAGNETIC_FIELD_UNCALIBRATED}
+     */
+    ASENSOR_TYPE_MAGNETIC_FIELD_UNCALIBRATED = 14,
+    /**
+     * {@link ASENSOR_TYPE_GAME_ROTATION_VECTOR}
+     */
+    ASENSOR_TYPE_GAME_ROTATION_VECTOR = 15,
+    /**
+     * {@link ASENSOR_TYPE_GYROSCOPE_UNCALIBRATED}
+     */
+    ASENSOR_TYPE_GYROSCOPE_UNCALIBRATED = 16,
+    /**
+     * {@link ASENSOR_TYPE_SIGNIFICANT_MOTION}
+     */
+    ASENSOR_TYPE_SIGNIFICANT_MOTION = 17,
+    /**
+     * {@link ASENSOR_TYPE_STEP_DETECTOR}
+     */
+    ASENSOR_TYPE_STEP_DETECTOR = 18,
+    /**
+     * {@link ASENSOR_TYPE_STEP_COUNTER}
+     */
+    ASENSOR_TYPE_STEP_COUNTER = 19,
+    /**
+     * {@link ASENSOR_TYPE_GEOMAGNETIC_ROTATION_VECTOR}
+     */
+    ASENSOR_TYPE_GEOMAGNETIC_ROTATION_VECTOR = 20,
+    /**
+     * {@link ASENSOR_TYPE_HEART_RATE}
+     */
+    ASENSOR_TYPE_HEART_RATE = 21,
+    /**
+     * {@link ASENSOR_TYPE_POSE_6DOF}
+     */
+    ASENSOR_TYPE_POSE_6DOF = 28,
+    /**
+     * {@link ASENSOR_TYPE_STATIONARY_DETECT}
+     */
+    ASENSOR_TYPE_STATIONARY_DETECT = 29,
+    /**
+     * {@link ASENSOR_TYPE_MOTION_DETECT}
+     */
+    ASENSOR_TYPE_MOTION_DETECT = 30,
+    /**
+     * {@link ASENSOR_TYPE_HEART_BEAT}
+     */
+    ASENSOR_TYPE_HEART_BEAT = 31,
+    /**
+     * This sensor type is for delivering additional sensor information aside
+     * from sensor event data.
+     *
+     * Additional information may include:
+     *     - {@link ASENSOR_ADDITIONAL_INFO_INTERNAL_TEMPERATURE}
+     *     - {@link ASENSOR_ADDITIONAL_INFO_SAMPLING}
+     *     - {@link ASENSOR_ADDITIONAL_INFO_SENSOR_PLACEMENT}
+     *     - {@link ASENSOR_ADDITIONAL_INFO_UNTRACKED_DELAY}
+     *     - {@link ASENSOR_ADDITIONAL_INFO_VEC3_CALIBRATION}
+     *
+     * This type will never bind to a sensor. In other words, no sensor in the
+     * sensor list can have the type {@link ASENSOR_TYPE_ADDITIONAL_INFO}.
+     *
+     * If a device supports the sensor additional information feature, it will
+     * report additional information events via {@link ASensorEvent} and will
+     * have {@link ASensorEvent#type} set to
+     * {@link ASENSOR_TYPE_ADDITIONAL_INFO} and {@link ASensorEvent#sensor} set
+     * to the handle of the reporting sensor.
+     *
+     * Additional information reports consist of multiple frames ordered by
+     * {@link ASensorEvent#timestamp}. The first frame in the report will have
+     * a {@link AAdditionalInfoEvent#type} of
+     * {@link ASENSOR_ADDITIONAL_INFO_BEGIN}, and the last frame in the report
+     * will have a {@link AAdditionalInfoEvent#type} of
+     * {@link ASENSOR_ADDITIONAL_INFO_END}.
+     *
+     */
+    ASENSOR_TYPE_ADDITIONAL_INFO = 33,
+    /**
+     * {@link ASENSOR_TYPE_LOW_LATENCY_OFFBODY_DETECT}
+     */
+    ASENSOR_TYPE_LOW_LATENCY_OFFBODY_DETECT = 34,
+    /**
+     * {@link ASENSOR_TYPE_ACCELEROMETER_UNCALIBRATED}
+     */
+    ASENSOR_TYPE_ACCELEROMETER_UNCALIBRATED = 35,
 };
 
 /**
@@ -181,6 +303,51 @@ enum {
     ASENSOR_DIRECT_CHANNEL_TYPE_HARDWARE_BUFFER = 2
 };
 
+/**
+ * Sensor Additional Info Types.
+ *
+ * Used to populate {@link AAdditionalInfoEvent#type}.
+ */
+enum {
+    /** Marks the beginning of additional information frames */
+    ASENSOR_ADDITIONAL_INFO_BEGIN = 0,
+
+    /** Marks the end of additional information frames */
+    ASENSOR_ADDITIONAL_INFO_END = 1,
+
+    /**
+     * Estimation of the delay that is not tracked by sensor timestamps. This
+     * includes delay introduced by sensor front-end filtering, data transport,
+     * etc.
+     * float[2]: delay in seconds, standard deviation of estimated value
+     */
+    ASENSOR_ADDITIONAL_INFO_UNTRACKED_DELAY = 0x10000,
+
+    /** float: Celsius temperature */
+    ASENSOR_ADDITIONAL_INFO_INTERNAL_TEMPERATURE,
+
+    /**
+     * First three rows of a homogeneous matrix, which represents calibration to
+     * a three-element vector raw sensor reading.
+     * float[12]: 3x4 matrix in row major order
+     */
+    ASENSOR_ADDITIONAL_INFO_VEC3_CALIBRATION,
+
+    /**
+     * Location and orientation of sensor element in the device frame: origin is
+     * the geometric center of the mobile device screen surface; the axis
+     * definition corresponds to Android sensor definitions.
+     * float[12]: 3x4 matrix in row major order
+     */
+    ASENSOR_ADDITIONAL_INFO_SENSOR_PLACEMENT,
+
+    /**
+     * float[2]: raw sample period in seconds,
+     *           standard deviation of sampling period
+     */
+    ASENSOR_ADDITIONAL_INFO_SAMPLING,
+};
+
 /*
  * A few useful constants
  */
@@ -196,7 +363,7 @@ enum {
  * A sensor event.
  */
 
-/* NOTE: Must match hardware/sensors.h */
+/* NOTE: changes to these structs have to be backward compatible */
 typedef struct ASensorVector {
     union {
         float v[3];
@@ -249,7 +416,7 @@ typedef struct ADynamicSensorEvent {
     int32_t  handle;
 } ADynamicSensorEvent;
 
-typedef struct {
+typedef struct AAdditionalInfoEvent {
     int32_t type;
     int32_t serial;
     union {
@@ -258,7 +425,7 @@ typedef struct {
     };
 } AAdditionalInfoEvent;
 
-/* NOTE: Must match hardware/sensors.h */
+/* NOTE: changes to this struct has to be backward compatible */
 typedef struct ASensorEvent {
     int32_t version; /* sizeof(struct ASensorEvent) */
     int32_t sensor;
@@ -328,6 +495,7 @@ struct ASensorEventQueue;
  * - ASensorEventQueue_hasEvents()
  * - ASensorEventQueue_getEvents()
  * - ASensorEventQueue_setEventRate()
+ * - ASensorEventQueue_requestAdditionalInfoEvents()
  */
 typedef struct ASensorEventQueue ASensorEventQueue;
 
@@ -352,6 +520,7 @@ struct ASensor;
  * - ASensor_getStringType()
  * - ASensor_getReportingMode()
  * - ASensor_isWakeUpSensor()
+ * - ASensor_getHandle()
  */
 typedef struct ASensor ASensor;
 /**
@@ -380,18 +549,24 @@ typedef ASensorRef const* ASensorList;
  *     ASensorManager* sensorManager = ASensorManager_getInstance();
  *
  */
+#if __ANDROID_API__ >= 26
 __attribute__ ((deprecated)) ASensorManager* ASensorManager_getInstance();
+#else
+ASensorManager* ASensorManager_getInstance();
+#endif
 
-/*
+#if __ANDROID_API__ >= 26
+/**
  * Get a reference to the sensor manager. ASensorManager is a singleton
  * per package as different packages may have access to different sensors.
  *
  * Example:
  *
- *    ASensorManager* sensorManager = ASensorManager_getInstanceForPackage("foo.bar.baz");
+ *     ASensorManager* sensorManager = ASensorManager_getInstanceForPackage("foo.bar.baz");
  *
  */
-ASensorManager* ASensorManager_getInstanceForPackage(const char* packageName);
+ASensorManager* ASensorManager_getInstanceForPackage(const char* packageName) __INTRODUCED_IN(26);
+#endif
 
 /**
  * Returns the list of available sensors.
@@ -409,7 +584,7 @@ ASensor const* ASensorManager_getDefaultSensor(ASensorManager* manager, int type
  * Returns the default sensor with the given type and wakeUp properties or NULL if no sensor
  * of this type and wakeUp properties exists.
  */
-ASensor const* ASensorManager_getDefaultSensorEx(ASensorManager* manager, int type, bool wakeUp);
+ASensor const* ASensorManager_getDefaultSensorEx(ASensorManager* manager, int type, bool wakeUp) __INTRODUCED_IN(21);
 #endif
 
 /**
@@ -427,7 +602,7 @@ ASensorEventQueue* ASensorManager_createEventQueue(ASensorManager* manager,
  */
 int ASensorManager_destroyEventQueue(ASensorManager* manager, ASensorEventQueue* queue);
 
-#if __ANDROID_API__ >= __ANDROID_API_O__
+#if __ANDROID_API__ >= 26
 /**
  * Create direct channel based on shared memory
  *
@@ -444,7 +619,7 @@ int ASensorManager_destroyEventQueue(ASensorManager* manager, ASensorEventQueue*
  *         {@link ASensorManager_destroyDirectChannel} and
  *         {@link ASensorManager_configureDirectReport}, or value less or equal to 0 for failures.
  */
-int ASensorManager_createSharedMemoryDirectChannel(ASensorManager* manager, int fd, size_t size);
+int ASensorManager_createSharedMemoryDirectChannel(ASensorManager* manager, int fd, size_t size) __INTRODUCED_IN(26);
 
 /**
  * Create direct channel based on AHardwareBuffer
@@ -462,7 +637,7 @@ int ASensorManager_createSharedMemoryDirectChannel(ASensorManager* manager, int 
  *         {@link ASensorManager_configureDirectReport}, or value less or equal to 0 for failures.
  */
 int ASensorManager_createHardwareBufferDirectChannel(
-        ASensorManager* manager, AHardwareBuffer const * buffer, size_t size);
+        ASensorManager* manager, AHardwareBuffer const * buffer, size_t size) __INTRODUCED_IN(26);
 
 /**
  * Destroy a direct channel
@@ -477,7 +652,7 @@ int ASensorManager_createHardwareBufferDirectChannel(
  *                  {@link ASensorManager_createSharedMemoryDirectChannel} or
  *                  {@link ASensorManager_createHardwareBufferDirectChannel}.
  */
-void ASensorManager_destroyDirectChannel(ASensorManager* manager, int channelId);
+void ASensorManager_destroyDirectChannel(ASensorManager* manager, int channelId) __INTRODUCED_IN(26);
 
 /**
  * Configure direct report on channel
@@ -496,14 +671,12 @@ void ASensorManager_destroyDirectChannel(ASensorManager* manager, int channelId)
  * {@link ASensor_isDirectChannelTypeSupported}, respectively.
  *
  * Example:
- * \code{.cpp}
- *      ASensorManager *manager = ...;
- *      ASensor *sensor = ...;
- *      int channelId = ...;
  *
- *      ASensorManager_configureDirectReport(
- *              manager, sensor, channel_id, ASENSOR_DIRECT_RATE_FAST);
- * \endcode
+ *     ASensorManager *manager = ...;
+ *     ASensor *sensor = ...;
+ *     int channelId = ...;
+ *
+ *     ASensorManager_configureDirectReport(manager, sensor, channel_id, ASENSOR_DIRECT_RATE_FAST);
  *
  * \param manager   the {@link ASensorManager} instance obtained from
  *                  {@link ASensorManager_getInstanceForPackage}.
@@ -516,61 +689,120 @@ void ASensorManager_destroyDirectChannel(ASensorManager* manager, int channelId)
  *
  * \return positive token for success or negative error code.
  */
-int ASensorManager_configureDirectReport(
-        ASensorManager* manager, ASensor const* sensor, int channelId, int rate);
-#endif
+int ASensorManager_configureDirectReport(ASensorManager* manager,
+        ASensor const* sensor, int channelId, int rate) __INTRODUCED_IN(26);
+#endif /* __ANDROID_API__ >= 26 */
 
 /*****************************************************************************/
 
 /**
- * Enable the selected sensor with a specified sampling period and max batch report latency.
- * Returns a negative error code on failure.
- * Note: To disable the selected sensor, use ASensorEventQueue_disableSensor() same as before.
+ * Enable the selected sensor with sampling and report parameters
+ *
+ * Enable the selected sensor at a specified sampling period and max batch report latency.
+ * To disable  sensor, use {@link ASensorEventQueue_disableSensor}.
+ *
+ * \param queue {@link ASensorEventQueue} for sensor event to be report to.
+ * \param sensor {@link ASensor} to be enabled.
+ * \param samplingPeriodUs sampling period of sensor in microseconds.
+ * \param maxBatchReportLatencyus maximum time interval between two batch of sensor events are
+ *                                delievered in microseconds. For sensor streaming, set to 0.
+ * \return 0 on success or a negative error code on failure.
  */
 int ASensorEventQueue_registerSensor(ASensorEventQueue* queue, ASensor const* sensor,
         int32_t samplingPeriodUs, int64_t maxBatchReportLatencyUs);
 
 /**
- * Enable the selected sensor. Returns a negative error code on failure.
+ * Enable the selected sensor at default sampling rate.
+ *
+ * Start event reports of a sensor to specified sensor event queue at a default rate.
+ *
+ * \param queue {@link ASensorEventQueue} for sensor event to be report to.
+ * \param sensor {@link ASensor} to be enabled.
+ *
+ * \return 0 on success or a negative error code on failure.
  */
 int ASensorEventQueue_enableSensor(ASensorEventQueue* queue, ASensor const* sensor);
 
 /**
- * Disable the selected sensor. Returns a negative error code on failure.
+ * Disable the selected sensor.
+ *
+ * Stop event reports from the sensor to specified sensor event queue.
+ *
+ * \param queue {@link ASensorEventQueue} to be changed
+ * \param sensor {@link ASensor} to be disabled
+ * \return 0 on success or a negative error code on failure.
  */
 int ASensorEventQueue_disableSensor(ASensorEventQueue* queue, ASensor const* sensor);
 
 /**
  * Sets the delivery rate of events in microseconds for the given sensor.
+ *
+ * This function has to be called after {@link ASensorEventQueue_enableSensor}.
  * Note that this is a hint only, generally event will arrive at a higher
  * rate. It is an error to set a rate inferior to the value returned by
  * ASensor_getMinDelay().
- * Returns a negative error code on failure.
+ *
+ * \param queue {@link ASensorEventQueue} to which sensor event is delivered.
+ * \param sensor {@link ASensor} of which sampling rate to be updated.
+ * \param usec sensor sampling period (1/sampling rate) in microseconds
+ * \return 0 on sucess or a negative error code on failure.
  */
 int ASensorEventQueue_setEventRate(ASensorEventQueue* queue, ASensor const* sensor, int32_t usec);
 
 /**
- * Returns true if there are one or more events available in the
- * sensor queue.  Returns 1 if the queue has events; 0 if
- * it does not have events; and a negative value if there is an error.
+ * Determine if a sensor event queue has pending event to be processed.
+ *
+ * \param queue {@link ASensorEventQueue} to be queried
+ * \return 1 if the queue has events; 0 if it does not have events;
+ *         or a negative value if there is an error.
  */
 int ASensorEventQueue_hasEvents(ASensorEventQueue* queue);
 
 /**
- * Returns the next available events from the queue.  Returns a negative
- * value if no events are available or an error has occurred, otherwise
- * the number of events returned.
+ * Retrieve pending events in sensor event queue
+ *
+ * Retrieve next available events from the queue to a specified event array.
+ *
+ * \param queue {@link ASensorEventQueue} to get events from
+ * \param events pointer to an array of {@link ASensorEvents}.
+ * \param count max number of event that can be filled into array event.
+ * \return number of events returned on success; negative error code when
+ *         no events are pending or an error has occurred.
  *
  * Examples:
- *   ASensorEvent event;
- *   ssize_t numEvent = ASensorEventQueue_getEvents(queue, &event, 1);
  *
- *   ASensorEvent eventBuffer[8];
- *   ssize_t numEvent = ASensorEventQueue_getEvents(queue, eventBuffer, 8);
+ *     ASensorEvent event;
+ *     ssize_t numEvent = ASensorEventQueue_getEvents(queue, &event, 1);
+ *
+ *     ASensorEvent eventBuffer[8];
+ *     ssize_t numEvent = ASensorEventQueue_getEvents(queue, eventBuffer, 8);
  *
  */
 ssize_t ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* events, size_t count);
 
+#if __ANDROID_API__ >= __ANDROID_API_Q__
+/**
+ * Request that {@link ASENSOR_TYPE_ADDITIONAL_INFO} events to be delivered on
+ * the given {@link ASensorEventQueue}.
+ *
+ * Sensor data events are always delivered to the {@ASensorEventQueue}.
+ *
+ * The {@link ASENSOR_TYPE_ADDITIONAL_INFO} events will be returned through
+ * {@link ASensorEventQueue_getEvents}. The client is responsible for checking
+ * {@link ASensorEvent#type} to determine the event type prior to handling of
+ * the event.
+ *
+ * The client must be tolerant of any value for
+ * {@link AAdditionalInfoEvent#type}, as new values may be defined in the future
+ * and may delivered to the client.
+ *
+ * \param queue {@link ASensorEventQueue} to configure
+ * \param enable true to request {@link ASENSOR_TYPE_ADDITIONAL_INFO} events,
+ *        false to stop receiving events
+ * \return 0 on success or a negative error code on failure
+ */
+int ASensorEventQueue_requestAdditionalInfoEvents(ASensorEventQueue* queue, bool enable);
+#endif /* __ANDROID_API__ >= __ANDRDOID_API_Q__ */
 
 /*****************************************************************************/
 
@@ -606,30 +838,30 @@ int ASensor_getMinDelay(ASensor const* sensor);
  * Returns the maximum size of batches for this sensor. Batches will often be
  * smaller, as the hardware fifo might be used for other sensors.
  */
-int ASensor_getFifoMaxEventCount(ASensor const* sensor);
+int ASensor_getFifoMaxEventCount(ASensor const* sensor) __INTRODUCED_IN(21);
 
 /**
  * Returns the hardware batch fifo size reserved to this sensor.
  */
-int ASensor_getFifoReservedEventCount(ASensor const* sensor);
+int ASensor_getFifoReservedEventCount(ASensor const* sensor) __INTRODUCED_IN(21);
 
 /**
  * Returns this sensor's string type.
  */
-const char* ASensor_getStringType(ASensor const* sensor);
+const char* ASensor_getStringType(ASensor const* sensor) __INTRODUCED_IN(21);
 
 /**
  * Returns the reporting mode for this sensor. One of AREPORTING_MODE_* constants.
  */
-int ASensor_getReportingMode(ASensor const* sensor);
+int ASensor_getReportingMode(ASensor const* sensor) __INTRODUCED_IN(21);
 
 /**
  * Returns true if this is a wake up sensor, false otherwise.
  */
-bool ASensor_isWakeUpSensor(ASensor const* sensor);
+bool ASensor_isWakeUpSensor(ASensor const* sensor) __INTRODUCED_IN(21);
 #endif /* __ANDROID_API__ >= 21 */
 
-#if __ANDROID_API__ >= __ANDROID_API_O__
+#if __ANDROID_API__ >= 26
 /**
  * Test if sensor supports a certain type of direct channel.
  *
@@ -639,7 +871,8 @@ bool ASensor_isWakeUpSensor(ASensor const* sensor);
  *                     or {@link ASENSOR_DIRECT_CHANNEL_TYPE_HARDWARE_BUFFER}.
  * \returns true if sensor supports the specified direct channel type.
  */
-bool ASensor_isDirectChannelTypeSupported(ASensor const* sensor, int channelType);
+bool ASensor_isDirectChannelTypeSupported(ASensor const* sensor, int channelType) __INTRODUCED_IN(26);
+
 /**
  * Get the highest direct rate level that a sensor support.
  *
@@ -649,8 +882,26 @@ bool ASensor_isDirectChannelTypeSupported(ASensor const* sensor, int channelType
  *         If return value is {@link ASENSOR_DIRECT_RATE_STOP}, it means the sensor
  *         does not support direct report.
  */
-int ASensor_getHighestDirectReportRateLevel(ASensor const* sensor);
-#endif
+int ASensor_getHighestDirectReportRateLevel(ASensor const* sensor) __INTRODUCED_IN(26);
+#endif /* __ANDROID_API__ >= 26 */
+
+#if __ANDROID_API__ >= __ANDROID_API_Q__
+/**
+ * Returns the sensor's handle.
+ *
+ * The handle identifies the sensor within the system and is included in the
+ * {@link ASensorEvent#sensor} field of sensor events, including those sent with type
+ * {@link ASENSOR_TYPE_ADDITIONAL_INFO}.
+ *
+ * A sensor's handle is able to be used to map {@link ASENSOR_TYPE_ADDITIONAL_INFO} events to the
+ * sensor that generated the event.
+ *
+ * It is important to note that the value returned by {@link ASensor_getHandle} is not the same as
+ * the value returned by the Java API {@link android.hardware.Sensor#getId} and no mapping exists
+ * between the values.
+ */
+int ASensor_getHandle(ASensor const* sensor) __INTRODUCED_IN(__ANDROID_API_Q__);
+#endif /* __ANDROID_API__ >= ANDROID_API_Q__ */
 
 #ifdef __cplusplus
 };

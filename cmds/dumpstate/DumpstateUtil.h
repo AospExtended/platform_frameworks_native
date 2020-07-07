@@ -19,6 +19,16 @@
 #include <cstdint>
 #include <string>
 
+/*
+ * Converts seconds to milliseconds.
+ */
+#define SEC_TO_MSEC(second) (second * 1000)
+
+/*
+ * Converts milliseconds to seconds.
+ */
+#define MSEC_TO_SEC(millisecond) (millisecond / 1000)
+
 namespace android {
 namespace os {
 namespace dumpstate {
@@ -66,9 +76,9 @@ class CommandOptions {
   private:
     class CommandOptionsValues {
       private:
-        CommandOptionsValues(int64_t timeout);
+        explicit CommandOptionsValues(int64_t timeout_ms);
 
-        int64_t timeout_;
+        int64_t timeout_ms_;
         bool always_;
         PrivilegeMode account_mode_;
         OutputMode output_mode_;
@@ -78,7 +88,7 @@ class CommandOptions {
         friend class CommandOptionsBuilder;
     };
 
-    CommandOptions(const CommandOptionsValues& values);
+    explicit CommandOptions(const CommandOptionsValues& values);
 
     const CommandOptionsValues values;
 
@@ -87,8 +97,17 @@ class CommandOptions {
       public:
         /* Sets the command to always run, even on `dry-run` mode. */
         CommandOptionsBuilder& Always();
-        /* Sets the command's PrivilegeMode as `SU_ROOT` */
+        /*
+         * Sets the command's PrivilegeMode as `SU_ROOT` unless overridden by system property
+         * 'dumpstate.unroot'.
+         */
         CommandOptionsBuilder& AsRoot();
+        /*
+         * Runs AsRoot() on userdebug builds. No-op on user builds since 'su' is
+         * not available. This is used for commands that return some useful information even
+         * when run as shell.
+         */
+        CommandOptionsBuilder& AsRootIfAvailable();
         /* Sets the command's PrivilegeMode as `DROP_ROOT` */
         CommandOptionsBuilder& DropRoot();
         /* Sets the command's OutputMode as `REDIRECT_TO_STDERR` */
@@ -100,13 +119,15 @@ class CommandOptions {
         CommandOptions Build();
 
       private:
-        CommandOptionsBuilder(int64_t timeout);
+        explicit CommandOptionsBuilder(int64_t timeout_ms);
         CommandOptionsValues values;
         friend class CommandOptions;
     };
 
-    /** Gets the command timeout, in seconds. */
+    /** Gets the command timeout in seconds. */
     int64_t Timeout() const;
+    /** Gets the command timeout in milliseconds. */
+    int64_t TimeoutInMs() const;
     /* Checks whether the command should always be run, even on dry-run mode. */
     bool Always() const;
     /** Gets the PrivilegeMode of the command. */
@@ -116,8 +137,11 @@ class CommandOptions {
     /** Gets the logging message header, it any. */
     std::string LoggingMessage() const;
 
-    /** Creates a builder with the requied timeout. */
-    static CommandOptionsBuilder WithTimeout(int64_t timeout);
+    /** Creates a builder with the requied timeout in seconds. */
+    static CommandOptionsBuilder WithTimeout(int64_t timeout_sec);
+
+    /** Creates a builder with the requied timeout in milliseconds. */
+    static CommandOptionsBuilder WithTimeoutInMs(int64_t timeout_ms);
 
     // Common options.
     static CommandOptions DEFAULT;
@@ -145,9 +169,17 @@ class PropertiesHelper {
      */
     static bool IsDryRun();
 
+    /**
+     * Checks whether root availability should be overridden.
+     *
+     * Useful to verify how dumpstate would work in a device with an user build.
+     */
+    static bool IsUnroot();
+
   private:
     static std::string build_type_;
     static int dry_run_;
+    static int unroot_;
 };
 
 /*

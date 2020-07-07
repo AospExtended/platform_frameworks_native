@@ -21,48 +21,89 @@
 
 #include <mutex>
 
+#include <gui/LayerState.h>
+
+#include <utils/KeyedVector.h>
 #include <utils/SortedVector.h>
+#include <utils/StrongPointer.h>
 #include <utils/Vector.h>
+
+#include "DisplayDevice.h"
 
 namespace android {
 
 class BufferItem;
 class Layer;
 class SurfaceFlinger;
+struct ComposerState;
+struct DisplayDeviceState;
 struct DisplayState;
 struct layer_state_t;
 
 constexpr auto DEFAULT_FILENAME = "/data/SurfaceTrace.dat";
 
+class SurfaceInterceptor {
+public:
+    virtual ~SurfaceInterceptor();
+
+    // Both vectors are used to capture the current state of SF as the initial snapshot in the trace
+    virtual void enable(const SortedVector<sp<Layer>>& layers,
+                        const DefaultKeyedVector<wp<IBinder>, DisplayDeviceState>& displays) = 0;
+    virtual void disable() = 0;
+    virtual bool isEnabled() = 0;
+
+    // Intercept display and surface transactions
+    virtual void saveTransaction(
+            const Vector<ComposerState>& stateUpdates,
+            const DefaultKeyedVector<wp<IBinder>, DisplayDeviceState>& displays,
+            const Vector<DisplayState>& changedDisplays, uint32_t flags) = 0;
+
+    // Intercept surface data
+    virtual void saveSurfaceCreation(const sp<const Layer>& layer) = 0;
+    virtual void saveSurfaceDeletion(const sp<const Layer>& layer) = 0;
+    virtual void saveBufferUpdate(const sp<const Layer>& layer, uint32_t width, uint32_t height,
+                                  uint64_t frameNumber) = 0;
+
+    // Intercept display data
+    virtual void saveDisplayCreation(const DisplayDeviceState& info) = 0;
+    virtual void saveDisplayDeletion(int32_t sequenceId) = 0;
+    virtual void savePowerModeUpdate(int32_t sequenceId, int32_t mode) = 0;
+    virtual void saveVSyncEvent(nsecs_t timestamp) = 0;
+};
+
+namespace impl {
+
 /*
  * SurfaceInterceptor intercepts and stores incoming streams of window
  * properties on SurfaceFlinger.
  */
-class SurfaceInterceptor {
+class SurfaceInterceptor final : public android::SurfaceInterceptor {
 public:
-    SurfaceInterceptor(SurfaceFlinger* const flinger);
+    explicit SurfaceInterceptor(SurfaceFlinger* const flinger);
+    ~SurfaceInterceptor() override = default;
+
     // Both vectors are used to capture the current state of SF as the initial snapshot in the trace
     void enable(const SortedVector<sp<Layer>>& layers,
-            const DefaultKeyedVector< wp<IBinder>, DisplayDeviceState>& displays);
-    void disable();
-    bool isEnabled();
+                const DefaultKeyedVector<wp<IBinder>, DisplayDeviceState>& displays) override;
+    void disable() override;
+    bool isEnabled() override;
 
     // Intercept display and surface transactions
     void saveTransaction(const Vector<ComposerState>& stateUpdates,
-            const DefaultKeyedVector< wp<IBinder>, DisplayDeviceState>& displays,
-            const Vector<DisplayState>& changedDisplays, uint32_t flags);
+                         const DefaultKeyedVector<wp<IBinder>, DisplayDeviceState>& displays,
+                         const Vector<DisplayState>& changedDisplays, uint32_t flags) override;
 
     // Intercept surface data
-    void saveSurfaceCreation(const sp<const Layer>& layer);
-    void saveSurfaceDeletion(const sp<const Layer>& layer);
+    void saveSurfaceCreation(const sp<const Layer>& layer) override;
+    void saveSurfaceDeletion(const sp<const Layer>& layer) override;
     void saveBufferUpdate(const sp<const Layer>& layer, uint32_t width, uint32_t height,
-            uint64_t frameNumber);
+                          uint64_t frameNumber) override;
 
     // Intercept display data
-    void saveDisplayCreation(const DisplayDeviceState& info);
-    void saveDisplayDeletion(int32_t displayId);
-    void savePowerModeUpdate(int32_t displayId, int32_t mode);
-    void saveVSyncEvent(nsecs_t timestamp);
+    void saveDisplayCreation(const DisplayDeviceState& info) override;
+    void saveDisplayDeletion(int32_t sequenceId) override;
+    void savePowerModeUpdate(int32_t sequenceId, int32_t mode) override;
+    void saveVSyncEvent(nsecs_t timestamp) override;
 
 private:
     // The creation increments of Surfaces and Displays do not contain enough information to capture
@@ -86,8 +127,8 @@ private:
             uint32_t height, uint64_t frameNumber);
     void addVSyncUpdateLocked(Increment* increment, nsecs_t timestamp);
     void addDisplayCreationLocked(Increment* increment, const DisplayDeviceState& info);
-    void addDisplayDeletionLocked(Increment* increment, int32_t displayId);
-    void addPowerModeUpdateLocked(Increment* increment, int32_t displayId, int32_t mode);
+    void addDisplayDeletionLocked(Increment* increment, int32_t sequenceId);
+    void addPowerModeUpdateLocked(Increment* increment, int32_t sequenceId, int32_t mode);
 
     // Add surface transactions to the trace
     SurfaceChange* createSurfaceChangeLocked(Transaction* transaction, int32_t layerId);
@@ -103,9 +144,9 @@ private:
     void addFlagsLocked(Transaction* transaction, int32_t layerId, uint8_t flags);
     void addLayerStackLocked(Transaction* transaction, int32_t layerId, uint32_t layerStack);
     void addCropLocked(Transaction* transaction, int32_t layerId, const Rect& rect);
+    void addCornerRadiusLocked(Transaction* transaction, int32_t layerId, float cornerRadius);
     void addDeferTransactionLocked(Transaction* transaction, int32_t layerId,
             const sp<const Layer>& layer, uint64_t frameNumber);
-    void addFinalCropLocked(Transaction* transaction, int32_t layerId, const Rect& rect);
     void addOverrideScalingModeLocked(Transaction* transaction, int32_t layerId,
             int32_t overrideScalingMode);
     void addSurfaceChangesLocked(Transaction* transaction, const layer_state_t& state);
@@ -114,17 +155,17 @@ private:
             const Vector<DisplayState>& changedDisplays, uint32_t transactionFlags);
 
     // Add display transactions to the trace
-    DisplayChange* createDisplayChangeLocked(Transaction* transaction, int32_t displayId);
-    void addDisplaySurfaceLocked(Transaction* transaction, int32_t displayId,
+    DisplayChange* createDisplayChangeLocked(Transaction* transaction, int32_t sequenceId);
+    void addDisplaySurfaceLocked(Transaction* transaction, int32_t sequenceId,
             const sp<const IGraphicBufferProducer>& surface);
-    void addDisplayLayerStackLocked(Transaction* transaction, int32_t displayId,
+    void addDisplayLayerStackLocked(Transaction* transaction, int32_t sequenceId,
             uint32_t layerStack);
-    void addDisplaySizeLocked(Transaction* transaction, int32_t displayId, uint32_t w,
+    void addDisplaySizeLocked(Transaction* transaction, int32_t sequenceId, uint32_t w,
             uint32_t h);
-    void addDisplayProjectionLocked(Transaction* transaction, int32_t displayId,
+    void addDisplayProjectionLocked(Transaction* transaction, int32_t sequenceId,
             int32_t orientation, const Rect& viewport, const Rect& frame);
     void addDisplayChangesLocked(Transaction* transaction,
-            const DisplayState& state, int32_t displayId);
+            const DisplayState& state, int32_t sequenceId);
 
 
     bool mEnabled {false};
@@ -134,6 +175,7 @@ private:
     SurfaceFlinger* const mFlinger;
 };
 
-}
+} // namespace impl
+} // namespace android
 
 #endif // ANDROID_SURFACEINTERCEPTOR_H

@@ -13,6 +13,7 @@
 #include <pdx/client.h>
 #include <pdx/rpc/remote_method.h>
 #include <pdx/service.h>
+#include <pdx/service_dispatcher.h>
 
 #include <uds/client_channel_factory.h>
 #include <uds/service_endpoint.h>
@@ -44,7 +45,7 @@ struct TestProtocol {
 
 class TestService : public ServiceBase<TestService> {
  public:
-  TestService(std::unique_ptr<Endpoint> endpoint)
+  explicit TestService(std::unique_ptr<Endpoint> endpoint)
       : ServiceBase{"TestService", std::move(endpoint)} {}
 
   Status<void> HandleMessage(Message& message) override {
@@ -77,11 +78,11 @@ class TestClient : public ClientBase<TestClient> {
 
 class TestServiceRunner {
  public:
-  TestServiceRunner(LocalHandle channel_socket) {
+  explicit TestServiceRunner(LocalHandle channel_socket) {
     auto endpoint = Endpoint::CreateFromSocketFd(LocalHandle{});
     endpoint->RegisterNewChannelForTests(std::move(channel_socket));
     service_ = TestService::Create(std::move(endpoint));
-    dispatcher_ = android::pdx::uds::ServiceDispatcher::Create();
+    dispatcher_ = ServiceDispatcher::Create();
     dispatcher_->AddService(service_);
     dispatch_thread_ = std::thread(
         std::bind(&ServiceDispatcher::EnterDispatchLoop, dispatcher_.get()));

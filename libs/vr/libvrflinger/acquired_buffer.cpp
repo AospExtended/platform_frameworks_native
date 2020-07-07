@@ -8,11 +8,11 @@ using android::pdx::LocalHandle;
 namespace android {
 namespace dvr {
 
-AcquiredBuffer::AcquiredBuffer(const std::shared_ptr<BufferConsumer>& buffer,
-                               LocalHandle acquire_fence)
-    : buffer_(buffer), acquire_fence_(std::move(acquire_fence)) {}
+AcquiredBuffer::AcquiredBuffer(const std::shared_ptr<ConsumerBuffer>& buffer,
+                               LocalHandle acquire_fence, std::size_t slot)
+    : buffer_(buffer), acquire_fence_(std::move(acquire_fence)), slot_(slot) {}
 
-AcquiredBuffer::AcquiredBuffer(const std::shared_ptr<BufferConsumer>& buffer,
+AcquiredBuffer::AcquiredBuffer(const std::shared_ptr<ConsumerBuffer>& buffer,
                                int* error) {
   LocalHandle fence;
   const int ret = buffer->Acquire(&fence);
@@ -31,18 +31,20 @@ AcquiredBuffer::AcquiredBuffer(const std::shared_ptr<BufferConsumer>& buffer,
   }
 }
 
-AcquiredBuffer::AcquiredBuffer(AcquiredBuffer&& other)
-    : buffer_(std::move(other.buffer_)),
-      acquire_fence_(std::move(other.acquire_fence_)) {}
+AcquiredBuffer::AcquiredBuffer(AcquiredBuffer&& other) noexcept {
+  *this = std::move(other);
+}
 
 AcquiredBuffer::~AcquiredBuffer() { Release(LocalHandle(kEmptyFence)); }
 
-AcquiredBuffer& AcquiredBuffer::operator=(AcquiredBuffer&& other) {
+AcquiredBuffer& AcquiredBuffer::operator=(AcquiredBuffer&& other) noexcept {
   if (this != &other) {
-    Release(LocalHandle(kEmptyFence));
+    Release();
 
-    buffer_ = std::move(other.buffer_);
-    acquire_fence_ = std::move(other.acquire_fence_);
+    using std::swap;
+    swap(buffer_, other.buffer_);
+    swap(acquire_fence_, other.acquire_fence_);
+    swap(slot_, other.slot_);
   }
   return *this;
 }
@@ -55,9 +57,9 @@ bool AcquiredBuffer::IsAvailable() const {
   if (acquire_fence_) {
     const int ret = sync_wait(acquire_fence_.Get(), 0);
     ALOGD_IF(TRACE || (ret < 0 && errno != ETIME),
-             "AcquiredBuffer::IsAvailable: acquire_fence_=%d sync_wait()=%d "
-             "errno=%d.",
-             acquire_fence_.Get(), ret, ret < 0 ? errno : 0);
+             "AcquiredBuffer::IsAvailable: buffer_id=%d acquire_fence=%d "
+             "sync_wait()=%d errno=%d.",
+             buffer_->id(), acquire_fence_.Get(), ret, ret < 0 ? errno : 0);
     if (ret == 0) {
       // The fence is completed, so to avoid further calls to sync_wait we close
       // it here.
@@ -73,14 +75,14 @@ LocalHandle AcquiredBuffer::ClaimAcquireFence() {
   return std::move(acquire_fence_);
 }
 
-std::shared_ptr<BufferConsumer> AcquiredBuffer::ClaimBuffer() {
+std::shared_ptr<ConsumerBuffer> AcquiredBuffer::ClaimBuffer() {
   return std::move(buffer_);
 }
 
 int AcquiredBuffer::Release(LocalHandle release_fence) {
+  ALOGD_IF(TRACE, "AcquiredBuffer::Release: buffer_id=%d release_fence=%d",
+           buffer_ ? buffer_->id() : -1, release_fence.Get());
   if (buffer_) {
-    // Close the release fence since we can't transfer it with an async release.
-    release_fence.Close();
     const int ret = buffer_->ReleaseAsync();
     if (ret < 0) {
       ALOGE("AcquiredBuffer::Release: Failed to release buffer %d: %s",
@@ -90,9 +92,10 @@ int AcquiredBuffer::Release(LocalHandle release_fence) {
     }
 
     buffer_ = nullptr;
-    acquire_fence_.Close();
   }
 
+  acquire_fence_.Close();
+  slot_ = 0;
   return 0;
 }
 

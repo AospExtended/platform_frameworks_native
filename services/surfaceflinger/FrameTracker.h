@@ -35,7 +35,7 @@ class String8;
 // possible.
 //
 // Some of the time values tracked may be set either as a specific timestamp
-// or a fence.  When a non-NULL fence is set for a given time value, the
+// or a fence.  When a non-nullptr fence is set for a given time value, the
 // signal time of that fence is used instead of the timestamp.
 class FrameTracker {
 
@@ -90,7 +90,7 @@ public:
     void logAndResetStats(const String8& name);
 
     // dumpStats dump appends the current frame display time history to the result string.
-    void dumpStats(String8& result) const;
+    void dumpStats(std::string& result) const;
 
 private:
     struct FrameRecord {

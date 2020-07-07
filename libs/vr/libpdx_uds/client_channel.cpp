@@ -1,3 +1,4 @@
+#include "uds/channel_parcelable.h"
 #include "uds/client_channel.h"
 
 #include <errno.h>
@@ -33,7 +34,9 @@ struct TransactionState {
     } else if (static_cast<size_t>(index) < response.channels.size()) {
       auto& channel_info = response.channels[index];
       *handle = ChannelManager::Get().CreateHandle(
-          std::move(channel_info.data_fd), std::move(channel_info.event_fd));
+          std::move(channel_info.data_fd),
+          std::move(channel_info.pollin_event_fd),
+          std::move(channel_info.pollhup_event_fd));
     } else {
       return false;
     }
@@ -53,9 +56,9 @@ struct TransactionState {
 
     if (auto* channel_data =
             ChannelManager::Get().GetChannelData(handle.value())) {
-      ChannelInfo<BorrowedHandle> channel_info;
-      channel_info.data_fd.Reset(handle.value());
-      channel_info.event_fd = channel_data->event_receiver.event_fd();
+      ChannelInfo<BorrowedHandle> channel_info{
+          channel_data->data_fd(), channel_data->pollin_event_fd(),
+          channel_data->pollhup_event_fd()};
       request.channels.push_back(std::move(channel_info));
       return request.channels.size() - 1;
     } else {
@@ -90,10 +93,12 @@ Status<void> SendRequest(const BorrowedHandle& socket_fd,
   size_t send_len = CountVectorSize(send_vector, send_count);
   InitRequest(&transaction_state->request, opcode, send_len, max_recv_len,
               false);
-  auto status = SendData(socket_fd, transaction_state->request);
-  if (status && send_len > 0)
-    status = SendDataVector(socket_fd, send_vector, send_count);
-  return status;
+  if (send_len == 0) {
+    send_vector = nullptr;
+    send_count = 0;
+  }
+  return SendData(socket_fd, transaction_state->request, send_vector,
+                  send_count);
 }
 
 Status<void> ReceiveResponse(const BorrowedHandle& socket_fd,
@@ -286,6 +291,29 @@ bool ClientChannel::GetChannelHandle(void* transaction_state,
                                      LocalChannelHandle* handle) const {
   auto* state = static_cast<TransactionState*>(transaction_state);
   return state->GetLocalChannelHandle(ref, handle);
+}
+
+std::unique_ptr<pdx::ChannelParcelable> ClientChannel::TakeChannelParcelable()
+    {
+  if (!channel_handle_)
+    return nullptr;
+
+  if (auto* channel_data =
+          ChannelManager::Get().GetChannelData(channel_handle_.value())) {
+    auto fds = channel_data->TakeFds();
+    auto parcelable = std::make_unique<ChannelParcelable>(
+        std::move(std::get<0>(fds)), std::move(std::get<1>(fds)),
+        std::move(std::get<2>(fds)));
+
+    // Here we need to explicitly close the channel handle so that the channel
+    // won't get shutdown in the destructor, while the FDs in ChannelParcelable
+    // can keep the channel alive so that new client can be created from it
+    // later.
+    channel_handle_.Close();
+    return parcelable;
+  } else {
+    return nullptr;
+  }
 }
 
 }  // namespace uds

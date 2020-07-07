@@ -1,4 +1,3 @@
-#define LOG_TAG "ServiceFramework"
 #include "pdx/service.h"
 
 #include <fcntl.h>
@@ -9,8 +8,6 @@
 #include <cstdint>
 
 #include <pdx/trace.h>
-
-#define TRACE 0
 
 namespace android {
 namespace pdx {
@@ -34,9 +31,9 @@ Message::Message(const MessageInfo& info)
 
 // C++11 specifies the move semantics for shared_ptr but not weak_ptr. This
 // means we have to manually implement the desired move semantics for Message.
-Message::Message(Message&& other) { *this = std::move(other); }
+Message::Message(Message&& other) noexcept { *this = std::move(other); }
 
-Message& Message::operator=(Message&& other) {
+Message& Message::operator=(Message&& other) noexcept {
   Destroy();
   auto base = reinterpret_cast<std::uint8_t*>(&info_);
   std::fill(&base[0], &base[sizeof(info_)], 0);
@@ -321,13 +318,7 @@ Status<void> Message::Reply(const RemoteHandle& handle) {
   PDX_TRACE_NAME("Message::ReplyFileHandle");
   auto svc = service_.lock();
   if (!replied_ && svc) {
-    Status<void> ret;
-
-    if (handle)
-      ret = svc->endpoint()->MessageReply(this, handle.Get());
-    else
-      ret = svc->endpoint()->MessageReply(this, handle.Get());
-
+    Status<void> ret = svc->endpoint()->MessageReply(this, handle.Get());
     replied_ = ret.ok();
     return ret;
   } else {

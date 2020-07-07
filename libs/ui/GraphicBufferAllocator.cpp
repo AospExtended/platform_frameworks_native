@@ -20,20 +20,25 @@
 
 #include <ui/GraphicBufferAllocator.h>
 
+#include <limits.h>
 #include <stdio.h>
 
 #include <grallocusage/GrallocUsageConversion.h>
 
+#include <android-base/stringprintf.h>
 #include <log/log.h>
 #include <utils/Singleton.h>
-#include <utils/String8.h>
 #include <utils/Trace.h>
 
+#include <ui/Gralloc.h>
 #include <ui/Gralloc2.h>
+#include <ui/Gralloc3.h>
 #include <ui/GraphicBufferMapper.h>
 
 namespace android {
 // ---------------------------------------------------------------------------
+
+using base::StringAppendF;
 
 ANDROID_SINGLETON_STATIC_INSTANCE( GraphicBufferAllocator )
 
@@ -41,55 +46,61 @@ Mutex GraphicBufferAllocator::sLock;
 KeyedVector<buffer_handle_t,
     GraphicBufferAllocator::alloc_rec_t> GraphicBufferAllocator::sAllocList;
 
-GraphicBufferAllocator::GraphicBufferAllocator()
-  : mMapper(GraphicBufferMapper::getInstance()),
-    mAllocator(std::make_unique<Gralloc2::Allocator>(
-                mMapper.getGrallocMapper()))
-{
+GraphicBufferAllocator::GraphicBufferAllocator() : mMapper(GraphicBufferMapper::getInstance()) {
+    mAllocator = std::make_unique<const Gralloc3Allocator>(
+            reinterpret_cast<const Gralloc3Mapper&>(mMapper.getGrallocMapper()));
+    if (!mAllocator->isLoaded()) {
+        mAllocator = std::make_unique<const Gralloc2Allocator>(
+                reinterpret_cast<const Gralloc2Mapper&>(mMapper.getGrallocMapper()));
+    }
+
+    if (!mAllocator->isLoaded()) {
+        LOG_ALWAYS_FATAL("gralloc-allocator is missing");
+    }
 }
 
 GraphicBufferAllocator::~GraphicBufferAllocator() {}
 
-void GraphicBufferAllocator::dump(String8& result) const
-{
+size_t GraphicBufferAllocator::getTotalSize() const {
+    Mutex::Autolock _l(sLock);
+    size_t total = 0;
+    for (size_t i = 0; i < sAllocList.size(); ++i) {
+        total += sAllocList.valueAt(i).size;
+    }
+    return total;
+}
+
+void GraphicBufferAllocator::dump(std::string& result) const {
     Mutex::Autolock _l(sLock);
     KeyedVector<buffer_handle_t, alloc_rec_t>& list(sAllocList);
     size_t total = 0;
-    const size_t SIZE = 4096;
-    char buffer[SIZE];
-    snprintf(buffer, SIZE, "Allocated buffers:\n");
-    result.append(buffer);
+    result.append("Allocated buffers:\n");
     const size_t c = list.size();
     for (size_t i=0 ; i<c ; i++) {
         const alloc_rec_t& rec(list.valueAt(i));
         if (rec.size) {
-            snprintf(buffer, SIZE, "%10p: %7.2f KiB | %4u (%4u) x %4u | %4u | %8X | 0x%" PRIx64
-                    " | %s\n",
-                    list.keyAt(i), rec.size/1024.0,
-                    rec.width, rec.stride, rec.height, rec.layerCount, rec.format,
-                    rec.usage, rec.requestorName.c_str());
+            StringAppendF(&result,
+                          "%10p: %7.2f KiB | %4u (%4u) x %4u | %4u | %8X | 0x%" PRIx64 " | %s\n",
+                          list.keyAt(i), rec.size / 1024.0, rec.width, rec.stride, rec.height,
+                          rec.layerCount, rec.format, rec.usage, rec.requestorName.c_str());
         } else {
-            snprintf(buffer, SIZE, "%10p: unknown     | %4u (%4u) x %4u | %4u | %8X | 0x%" PRIx64
-                    " | %s\n",
-                    list.keyAt(i),
-                    rec.width, rec.stride, rec.height, rec.layerCount, rec.format,
-                    rec.usage, rec.requestorName.c_str());
+            StringAppendF(&result,
+                          "%10p: unknown     | %4u (%4u) x %4u | %4u | %8X | 0x%" PRIx64 " | %s\n",
+                          list.keyAt(i), rec.width, rec.stride, rec.height, rec.layerCount,
+                          rec.format, rec.usage, rec.requestorName.c_str());
         }
-        result.append(buffer);
         total += rec.size;
     }
-    snprintf(buffer, SIZE, "Total allocated (estimate): %.2f KB\n", total/1024.0);
-    result.append(buffer);
+    StringAppendF(&result, "Total allocated (estimate): %.2f KB\n", total / 1024.0);
 
-    std::string deviceDump = mAllocator->dumpDebugInfo();
-    result.append(deviceDump.c_str(), deviceDump.size());
+    result.append(mAllocator->dumpDebugInfo());
 }
 
 void GraphicBufferAllocator::dumpToSystemLog()
 {
-    String8 s;
+    std::string s;
     GraphicBufferAllocator::getInstance().dump(s);
-    ALOGD("%s", s.string());
+    ALOGD("%s", s.c_str());
 }
 
 status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
@@ -104,22 +115,39 @@ status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
     if (!width || !height)
         width = height = 1;
 
+    const uint32_t bpp = bytesPerPixel(format);
+    if (std::numeric_limits<size_t>::max() / width / height < static_cast<size_t>(bpp)) {
+        ALOGE("Failed to allocate (%u x %u) layerCount %u format %d "
+              "usage %" PRIx64 ": Requesting too large a buffer size",
+              width, height, layerCount, format, usage);
+        return BAD_VALUE;
+    }
+
     // Ensure that layerCount is valid.
     if (layerCount < 1)
         layerCount = 1;
 
-    Gralloc2::IMapper::BufferDescriptorInfo info = {};
-    info.width = width;
-    info.height = height;
-    info.layerCount = layerCount;
-    info.format = static_cast<Gralloc2::PixelFormat>(format);
-    info.usage = usage;
+#ifndef ADDNL_GRALLOC_10_USAGE_BITS
+    // TODO(b/72323293, b/72703005): Remove these invalid bits from callers
+    usage &= ~static_cast<uint64_t>((1 << 10) | (1 << 13));
+#endif
 
-    Gralloc2::Error error = mAllocator->allocate(info, stride, handle);
-    if (error == Gralloc2::Error::NONE) {
+    status_t error =
+            mAllocator->allocate(width, height, format, layerCount, usage, 1, stride, handle);
+    size_t bufSize;
+
+    // if stride has no meaning or is too large,
+    // approximate size with the input width instead
+    if ((*stride) != 0 &&
+        std::numeric_limits<size_t>::max() / height / (*stride) < static_cast<size_t>(bpp)) {
+        bufSize = static_cast<size_t>(width) * height * bpp;
+    } else {
+        bufSize = static_cast<size_t>((*stride)) * height * bpp;
+    }
+
+    if (error == NO_ERROR) {
         Mutex::Autolock _l(sLock);
         KeyedVector<buffer_handle_t, alloc_rec_t>& list(sAllocList);
-        uint32_t bpp = bytesPerPixel(format);
         alloc_rec_t rec;
         rec.width = width;
         rec.height = height;
@@ -127,7 +155,7 @@ status_t GraphicBufferAllocator::allocate(uint32_t width, uint32_t height,
         rec.format = format;
         rec.layerCount = layerCount;
         rec.usage = usage;
-        rec.size = static_cast<size_t>(height * (*stride) * bpp);
+        rec.size = bufSize;
         rec.requestorName = std::move(requestorName);
         list.add(*handle, rec);
 

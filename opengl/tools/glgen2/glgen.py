@@ -117,6 +117,8 @@ class TrampolineGen(reg.OutputGenerator):
         reg.OutputGenerator.__init__(self, sys.stderr, sys.stderr, None)
 
     def genCmd(self, cmd, name):
+        if re.search('Win32', name):
+            return
         reg.OutputGenerator.genCmd(self, cmd, name)
 
         rtype, fname = parseProto(cmd.elem.find('proto'))
@@ -142,6 +144,8 @@ class ApiGenerator(reg.OutputGenerator):
         self.enums = collections.OrderedDict()
 
     def genCmd(self, cmd, name):
+        if re.search('Win32', name):
+            return
         reg.OutputGenerator.genCmd(self, cmd, name)
         rtype, fname = parseProto(cmd.elem.find('proto'))
         params = [parseParam(p) for p in cmd.elem.findall('param')]
@@ -165,6 +169,8 @@ class ApiGenerator(reg.OutputGenerator):
         # to get the information out though, and it's not critical right now,
         # so leaving for later.
         if re.search('_BIT($|\d*_)', name):
+            return
+        if re.search('D3D|WIN32', name):
             return
 
         # Skip non-hex values (GL_TRUE, GL_FALSE, header guard junk)
@@ -243,6 +249,27 @@ if __name__ == '__main__':
             filename            = '../../libs/GLES2/gl2ext_api.in')]
     for opts in TRAMPOLINE_OPTIONS:
         registry.apiGen(opts)
+
+    # Generate a GLESv1_CM entries separately to avoid extra driver loading time
+    apigen = ApiGenerator()
+    registry.setGenerator(apigen)
+    API_OPTIONS = [
+        # Generate non-extension versions of each API first, then extensions,
+        # so that if an extension enum was later standardized, we see the non-
+        # suffixed version first.
+        reg.GeneratorOptions(
+            apiname             = 'gles1',
+            profile             = 'common'),
+        reg.GeneratorOptions(
+            apiname             = 'gles1',
+            profile             = 'common',
+            emitversions        = None,
+            defaultExtensions   = 'gles1')]
+    for opts in API_OPTIONS:
+        registry.apiGen(opts)
+    apigen.finish()
+    with open('../../libs/entries_gles1.in', 'w') as f:
+        apigen.writeEntries(f)
 
     apigen = ApiGenerator()
     registry.setGenerator(apigen)

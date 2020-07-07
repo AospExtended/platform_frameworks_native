@@ -26,12 +26,12 @@
 #include <sys/capability.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 
 #include <android-base/logging.h>
 #include <android-base/macros.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <art_image_values.h>
 #include <cutils/fs.h>
 #include <cutils/properties.h>
 #include <dex2oat_return_codes.h>
@@ -43,6 +43,7 @@
 #include "globals.h"
 #include "installd_constants.h"
 #include "installd_deps.h"  // Need to fill in requirements of commands.
+#include "otapreopt_parameters.h"
 #include "otapreopt_utils.h"
 #include "system_properties.h"
 #include "utils.h"
@@ -56,7 +57,6 @@
 #define REPLY_MAX     256   /* largest reply allowed */
 
 using android::base::EndsWith;
-using android::base::Join;
 using android::base::Split;
 using android::base::StartsWith;
 using android::base::StringPrintf;
@@ -78,10 +78,21 @@ static_assert(DEXOPT_SECONDARY_DEX  == 1 << 5, "DEXOPT_SECONDARY_DEX unexpected.
 static_assert(DEXOPT_FORCE          == 1 << 6, "DEXOPT_FORCE unexpected.");
 static_assert(DEXOPT_STORAGE_CE     == 1 << 7, "DEXOPT_STORAGE_CE unexpected.");
 static_assert(DEXOPT_STORAGE_DE     == 1 << 8, "DEXOPT_STORAGE_DE unexpected.");
+static_assert(DEXOPT_ENABLE_HIDDEN_API_CHECKS == 1 << 10,
+        "DEXOPT_ENABLE_HIDDEN_API_CHECKS unexpected");
+static_assert(DEXOPT_GENERATE_COMPACT_DEX == 1 << 11, "DEXOPT_GENERATE_COMPACT_DEX unexpected");
+static_assert(DEXOPT_GENERATE_APP_IMAGE == 1 << 12, "DEXOPT_GENERATE_APP_IMAGE unexpected");
 
-static_assert(DEXOPT_MASK           == 0x1fe, "DEXOPT_MASK unexpected.");
+static_assert(DEXOPT_MASK           == (0x1dfe | DEXOPT_IDLE_BACKGROUND_JOB),
+              "DEXOPT_MASK unexpected.");
 
 
+template<typename T>
+static constexpr bool IsPowerOfTwo(T x) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  // TODO: assert unsigned. There is currently many uses with signed values.
+  return (x & (x - 1)) == 0;
+}
 
 template<typename T>
 static constexpr T RoundDown(T x, typename std::decay<T>::type n) {
@@ -146,39 +157,24 @@ class OTAPreoptService {
                 return 0;
             }
             // Copy in the default value.
-            strncpy(value, default_value, kPropertyValueMax - 1);
+            strlcpy(value, default_value, kPropertyValueMax - 1);
             value[kPropertyValueMax - 1] = 0;
             return strlen(default_value);// TODO: Need to truncate?
         }
-        size_t size = std::min(kPropertyValueMax - 1, prop_value->length());
-        strncpy(value, prop_value->data(), size);
-        value[size] = 0;
-        return static_cast<int>(size);
+        size_t size = std::min(kPropertyValueMax - 1, prop_value->length()) + 1;
+        strlcpy(value, prop_value->data(), size);
+        return static_cast<int>(size - 1);
     }
 
     std::string GetOTADataDirectory() const {
-        return StringPrintf("%s/%s", GetOtaDirectoryPrefix().c_str(), target_slot_.c_str());
+        return StringPrintf("%s/%s", GetOtaDirectoryPrefix().c_str(), GetTargetSlot().c_str());
     }
 
     const std::string& GetTargetSlot() const {
-        return target_slot_;
+        return parameters_.target_slot;
     }
 
 private:
-
-    struct Parameters {
-        const char *apk_path;
-        uid_t uid;
-        const char *pkgName;
-        const char *instruction_set;
-        int dexopt_needed;
-        const char* oat_dir;
-        int dexopt_flags;
-        const char* compiler_filter;
-        const char* volume_uuid;
-        const char* shared_libraries;
-        const char* se_info;
-    };
 
     bool ReadSystemProperties() {
         static constexpr const char* kPropertyFiles[] = {
@@ -281,6 +277,13 @@ private:
         return true;
     }
 
+    bool ParseBool(const char* in) {
+        if (strcmp(in, "true") == 0) {
+            return true;
+        }
+        return false;
+    }
+
     bool ParseUInt(const char* in, uint32_t* out) {
         char* end;
         long long int result = strtoll(in, &end, 0);
@@ -296,245 +299,7 @@ private:
     }
 
     bool ReadArguments(int argc, char** argv) {
-        // Expected command line:
-        //   target-slot [version] dexopt {DEXOPT_PARAMETERS}
-
-        const char* target_slot_arg = argv[1];
-        if (target_slot_arg == nullptr) {
-            LOG(ERROR) << "Missing parameters";
-            return false;
-        }
-        // Sanitize value. Only allow (a-zA-Z0-9_)+.
-        target_slot_ = target_slot_arg;
-        if (!ValidateTargetSlotSuffix(target_slot_)) {
-            LOG(ERROR) << "Target slot suffix not legal: " << target_slot_;
-            return false;
-        }
-
-        // Check for version or "dexopt" next.
-        if (argv[2] == nullptr) {
-            LOG(ERROR) << "Missing parameters";
-            return false;
-        }
-
-        if (std::string("dexopt").compare(argv[2]) == 0) {
-            // This is version 1 (N) or pre-versioning version 2.
-            constexpr int kV2ArgCount =   1   // "otapreopt"
-                                        + 1   // slot
-                                        + 1   // "dexopt"
-                                        + 1   // apk_path
-                                        + 1   // uid
-                                        + 1   // pkg
-                                        + 1   // isa
-                                        + 1   // dexopt_needed
-                                        + 1   // oat_dir
-                                        + 1   // dexopt_flags
-                                        + 1   // filter
-                                        + 1   // volume
-                                        + 1   // libs
-                                        + 1;  // seinfo
-            if (argc == kV2ArgCount) {
-                return ReadArgumentsV2(argc, argv, false);
-            } else {
-                return ReadArgumentsV1(argc, argv);
-            }
-        }
-
-        uint32_t version;
-        if (!ParseUInt(argv[2], &version)) {
-            LOG(ERROR) << "Could not parse version: " << argv[2];
-            return false;
-        }
-
-        switch (version) {
-            case 2:
-                return ReadArgumentsV2(argc, argv, true);
-
-            default:
-                LOG(ERROR) << "Unsupported version " << version;
-                return false;
-        }
-    }
-
-    bool ReadArgumentsV2(int argc ATTRIBUTE_UNUSED, char** argv, bool versioned) {
-        size_t dexopt_index = versioned ? 3 : 2;
-
-        // Check for "dexopt".
-        if (argv[dexopt_index] == nullptr) {
-            LOG(ERROR) << "Missing parameters";
-            return false;
-        }
-        if (std::string("dexopt").compare(argv[dexopt_index]) != 0) {
-            LOG(ERROR) << "Expected \"dexopt\"";
-            return false;
-        }
-
-        size_t param_index = 0;
-        for (;; ++param_index) {
-            const char* param = argv[dexopt_index + 1 + param_index];
-            if (param == nullptr) {
-                break;
-            }
-
-            switch (param_index) {
-                case 0:
-                    package_parameters_.apk_path = param;
-                    break;
-
-                case 1:
-                    package_parameters_.uid = atoi(param);
-                    break;
-
-                case 2:
-                    package_parameters_.pkgName = param;
-                    break;
-
-                case 3:
-                    package_parameters_.instruction_set = param;
-                    break;
-
-                case 4:
-                    package_parameters_.dexopt_needed = atoi(param);
-                    break;
-
-                case 5:
-                    package_parameters_.oat_dir = param;
-                    break;
-
-                case 6:
-                    package_parameters_.dexopt_flags = atoi(param);
-                    break;
-
-                case 7:
-                    package_parameters_.compiler_filter = param;
-                    break;
-
-                case 8:
-                    package_parameters_.volume_uuid = ParseNull(param);
-                    break;
-
-                case 9:
-                    package_parameters_.shared_libraries = ParseNull(param);
-                    break;
-
-                case 10:
-                    package_parameters_.se_info = ParseNull(param);
-                    break;
-
-                default:
-                    LOG(ERROR) << "Too many arguments, got " << param;
-                    return false;
-            }
-        }
-
-        if (param_index != 11) {
-            LOG(ERROR) << "Not enough parameters";
-            return false;
-        }
-
-        return true;
-    }
-
-    static int ReplaceMask(int input, int old_mask, int new_mask) {
-        return (input & old_mask) != 0 ? new_mask : 0;
-    }
-
-    bool ReadArgumentsV1(int argc ATTRIBUTE_UNUSED, char** argv) {
-        // Check for "dexopt".
-        if (argv[2] == nullptr) {
-            LOG(ERROR) << "Missing parameters";
-            return false;
-        }
-        if (std::string("dexopt").compare(argv[2]) != 0) {
-            LOG(ERROR) << "Expected \"dexopt\"";
-            return false;
-        }
-
-        size_t param_index = 0;
-        for (;; ++param_index) {
-            const char* param = argv[3 + param_index];
-            if (param == nullptr) {
-                break;
-            }
-
-            switch (param_index) {
-                case 0:
-                    package_parameters_.apk_path = param;
-                    break;
-
-                case 1:
-                    package_parameters_.uid = atoi(param);
-                    break;
-
-                case 2:
-                    package_parameters_.pkgName = param;
-                    break;
-
-                case 3:
-                    package_parameters_.instruction_set = param;
-                    break;
-
-                case 4: {
-                    // Version 1 had:
-                    //   DEXOPT_DEX2OAT_NEEDED       = 1
-                    //   DEXOPT_PATCHOAT_NEEDED      = 2
-                    //   DEXOPT_SELF_PATCHOAT_NEEDED = 3
-                    // We will simply use DEX2OAT_FROM_SCRATCH.
-                    package_parameters_.dexopt_needed = DEX2OAT_FROM_SCRATCH;
-                    break;
-                }
-
-                case 5:
-                    package_parameters_.oat_dir = param;
-                    break;
-
-                case 6: {
-                    // Version 1 had:
-                    constexpr int OLD_DEXOPT_PUBLIC         = 1 << 1;
-                    // Note: DEXOPT_SAFEMODE has been removed.
-                    // constexpr int OLD_DEXOPT_SAFEMODE       = 1 << 2;
-                    constexpr int OLD_DEXOPT_DEBUGGABLE     = 1 << 3;
-                    constexpr int OLD_DEXOPT_BOOTCOMPLETE   = 1 << 4;
-                    constexpr int OLD_DEXOPT_PROFILE_GUIDED = 1 << 5;
-                    constexpr int OLD_DEXOPT_OTA            = 1 << 6;
-                    int input = atoi(param);
-                    package_parameters_.dexopt_flags =
-                            ReplaceMask(input, OLD_DEXOPT_PUBLIC, DEXOPT_PUBLIC) |
-                            ReplaceMask(input, OLD_DEXOPT_DEBUGGABLE, DEXOPT_DEBUGGABLE) |
-                            ReplaceMask(input, OLD_DEXOPT_BOOTCOMPLETE, DEXOPT_BOOTCOMPLETE) |
-                            ReplaceMask(input, OLD_DEXOPT_PROFILE_GUIDED, DEXOPT_PROFILE_GUIDED) |
-                            ReplaceMask(input, OLD_DEXOPT_OTA, 0);
-                    break;
-                }
-
-                case 7:
-                    package_parameters_.compiler_filter = param;
-                    break;
-
-                case 8:
-                    package_parameters_.volume_uuid = ParseNull(param);
-                    break;
-
-                case 9:
-                    package_parameters_.shared_libraries = ParseNull(param);
-                    break;
-
-                default:
-                    LOG(ERROR) << "Too many arguments, got " << param;
-                    return false;
-            }
-        }
-
-        if (param_index != 10) {
-            LOG(ERROR) << "Not enough parameters";
-            return false;
-        }
-
-        // Set se_info to null. It is only relevant for secondary dex files, which we won't
-        // receive from a v1 A side.
-        package_parameters_.se_info = nullptr;
-
-        return true;
+        return parameters_.ReadArguments(argc, const_cast<const char**>(argv));
     }
 
     void PrepareEnvironment() {
@@ -550,26 +315,13 @@ private:
     // Ensure that we have the right boot image. The first time any app is
     // compiled, we'll try to generate it.
     bool PrepareBootImage(bool force) const {
-        if (package_parameters_.instruction_set == nullptr) {
+        if (parameters_.instruction_set == nullptr) {
             LOG(ERROR) << "Instruction set missing.";
             return false;
         }
-        const char* isa = package_parameters_.instruction_set;
-
-        // Check whether the file exists where expected.
+        const char* isa = parameters_.instruction_set;
         std::string dalvik_cache = GetOTADataDirectory() + "/" + DALVIK_CACHE;
         std::string isa_path = dalvik_cache + "/" + isa;
-        std::string art_path = isa_path + "/system@framework@boot.art";
-        std::string oat_path = isa_path + "/system@framework@boot.oat";
-        bool cleared = false;
-        if (access(art_path.c_str(), F_OK) == 0 && access(oat_path.c_str(), F_OK) == 0) {
-            // Files exist, assume everything is alright if not forced. Otherwise clean up.
-            if (!force) {
-                return true;
-            }
-            ClearDirectory(isa_path);
-            cleared = true;
-        }
 
         // Reset umask in otapreopt, so that we control the the access for the files we create.
         umask(0);
@@ -588,18 +340,34 @@ private:
             }
         }
 
-        // Prepare to create.
+        // Check whether we have files in /data.
+        // TODO: check that the files are correct wrt/ jars.
+        std::string art_path = isa_path + "/system@framework@boot.art";
+        std::string oat_path = isa_path + "/system@framework@boot.oat";
+        bool cleared = false;
+        if (access(art_path.c_str(), F_OK) == 0 && access(oat_path.c_str(), F_OK) == 0) {
+            // Files exist, assume everything is alright if not forced. Otherwise clean up.
+            if (!force) {
+                return true;
+            }
+            ClearDirectory(isa_path);
+            cleared = true;
+        }
+
+        // Check whether we have an image in /system.
+        // TODO: check that the files are correct wrt/ jars.
+        std::string preopted_boot_art_path = StringPrintf("/system/framework/%s/boot.art", isa);
+        if (access(preopted_boot_art_path.c_str(), F_OK) == 0) {
+            // Note: we ignore |force| here.
+            return true;
+        }
+
+
         if (!cleared) {
             ClearDirectory(isa_path);
         }
 
-        std::string preopted_boot_art_path = StringPrintf("/system/framework/%s/boot.art", isa);
-        if (access(preopted_boot_art_path.c_str(), F_OK) == 0) {
-          return PatchoatBootImage(art_path, isa);
-        } else {
-          // No preopted boot image. Try to compile.
-          return Dex2oatBootImage(boot_classpath_, art_path, oat_path, isa);
-        }
+        return Dex2oatBootImage(boot_classpath_, art_path, oat_path, isa);
     }
 
     static bool CreatePath(const std::string& path) {
@@ -664,45 +432,22 @@ private:
         CHECK_EQ(0, closedir(c_dir)) << "Unable to close directory.";
     }
 
-    bool PatchoatBootImage(const std::string& art_path, const char* isa) const {
-        // This needs to be kept in sync with ART, see art/runtime/gc/space/image_space.cc.
-
-        std::vector<std::string> cmd;
-        cmd.push_back("/system/bin/patchoat");
-
-        cmd.push_back("--input-image-location=/system/framework/boot.art");
-        cmd.push_back(StringPrintf("--output-image-file=%s", art_path.c_str()));
-
-        cmd.push_back(StringPrintf("--instruction-set=%s", isa));
-
-        int32_t base_offset = ChooseRelocationOffsetDelta(ART_BASE_ADDRESS_MIN_DELTA,
-                                                          ART_BASE_ADDRESS_MAX_DELTA);
-        cmd.push_back(StringPrintf("--base-offset-delta=%d", base_offset));
-
-        std::string error_msg;
-        bool result = Exec(cmd, &error_msg);
-        if (!result) {
-            LOG(ERROR) << "Could not generate boot image: " << error_msg;
-        }
-        return result;
-    }
-
     bool Dex2oatBootImage(const std::string& boot_cp,
                           const std::string& art_path,
                           const std::string& oat_path,
                           const char* isa) const {
         // This needs to be kept in sync with ART, see art/runtime/gc/space/image_space.cc.
         std::vector<std::string> cmd;
-        cmd.push_back("/system/bin/dex2oat");
+        cmd.push_back(kDex2oatPath);
         cmd.push_back(StringPrintf("--image=%s", art_path.c_str()));
         for (const std::string& boot_part : Split(boot_cp, ":")) {
             cmd.push_back(StringPrintf("--dex-file=%s", boot_part.c_str()));
         }
         cmd.push_back(StringPrintf("--oat-file=%s", oat_path.c_str()));
 
-        int32_t base_offset = ChooseRelocationOffsetDelta(ART_BASE_ADDRESS_MIN_DELTA,
-                ART_BASE_ADDRESS_MAX_DELTA);
-        cmd.push_back(StringPrintf("--base=0x%x", ART_BASE_ADDRESS + base_offset));
+        int32_t base_offset = ChooseRelocationOffsetDelta(art::GetImageMinBaseAddressDelta(),
+                                                          art::GetImageMaxBaseAddressDelta());
+        cmd.push_back(StringPrintf("--base=0x%x", art::GetImageBaseAddress() + base_offset));
 
         cmd.push_back(StringPrintf("--instruction-set=%s", isa));
 
@@ -733,6 +478,10 @@ private:
                 "-j",
                 false,
                 cmd);
+        AddCompilerOptionFromSystemProperty("dalvik.vm.image-dex2oat-cpu-set",
+                "--cpu-set=",
+                false,
+                cmd);
         AddCompilerOptionFromSystemProperty(
                 StringPrintf("dalvik.vm.isa.%s.variant", isa).c_str(),
                 "--instruction-set-variant=",
@@ -753,10 +502,6 @@ private:
     }
 
     static const char* ParseNull(const char* arg) {
-        // b/38186355. Revert soon.
-        if (strcmp(arg, "!null") == 0) {
-            return nullptr;
-        }
         return (strcmp(arg, "!") == 0) ? nullptr : arg;
     }
 
@@ -782,17 +527,18 @@ private:
         //       jar content must be exactly the same).
 
         //       (This is ugly as it's the only thing where we need to understand the contents
-        //        of package_parameters_, but it beats postponing the decision or using the call-
+        //        of parameters_, but it beats postponing the decision or using the call-
         //        backs to do weird things.)
-        const char* apk_path = package_parameters_.apk_path;
+        const char* apk_path = parameters_.apk_path;
         CHECK(apk_path != nullptr);
-        if (StartsWith(apk_path, android_root_.c_str())) {
+        if (StartsWith(apk_path, android_root_)) {
             const char* last_slash = strrchr(apk_path, '/');
             if (last_slash != nullptr) {
                 std::string path(apk_path, last_slash - apk_path + 1);
                 CHECK(EndsWith(path, "/"));
                 path = path + "oat";
                 if (access(path.c_str(), F_OK) == 0) {
+                    LOG(INFO) << "Skipping A/B OTA preopt of already preopted package " << apk_path;
                     return true;
                 }
             }
@@ -804,26 +550,34 @@ private:
         // this tool will wipe the OTA artifact cache and try again (for robustness after
         // a failed OTA with remaining cache artifacts).
         if (access(apk_path, F_OK) != 0) {
-            LOG(WARNING) << "Skipping preopt of non-existing package " << apk_path;
+            LOG(WARNING) << "Skipping A/B OTA preopt of non-existing package " << apk_path;
             return true;
         }
 
         return false;
     }
 
-    // Run dexopt with the parameters of package_parameters_.
+    // Run dexopt with the parameters of parameters_.
+    // TODO(calin): embed the profile name in the parameters.
     int Dexopt() {
-        return dexopt(package_parameters_.apk_path,
-                      package_parameters_.uid,
-                      package_parameters_.pkgName,
-                      package_parameters_.instruction_set,
-                      package_parameters_.dexopt_needed,
-                      package_parameters_.oat_dir,
-                      package_parameters_.dexopt_flags,
-                      package_parameters_.compiler_filter,
-                      package_parameters_.volume_uuid,
-                      package_parameters_.shared_libraries,
-                      package_parameters_.se_info);
+        std::string dummy;
+        return dexopt(parameters_.apk_path,
+                      parameters_.uid,
+                      parameters_.pkgName,
+                      parameters_.instruction_set,
+                      parameters_.dexopt_needed,
+                      parameters_.oat_dir,
+                      parameters_.dexopt_flags,
+                      parameters_.compiler_filter,
+                      parameters_.volume_uuid,
+                      parameters_.shared_libraries,
+                      parameters_.se_info,
+                      parameters_.downgrade,
+                      parameters_.target_sdk_version,
+                      parameters_.profile_name,
+                      parameters_.dex_metadata_path,
+                      parameters_.compilation_reason,
+                      &dummy);
     }
 
     int RunPreopt() {
@@ -839,7 +593,7 @@ private:
         // If the dexopt failed, we may have a stale boot image from a previous OTA run.
         // Then regenerate and retry.
         if (WEXITSTATUS(dexopt_result) ==
-                static_cast<int>(art::dex2oat::ReturnCode::kCreateRuntime)) {
+                static_cast<int>(::art::dex2oat::ReturnCode::kCreateRuntime)) {
             if (!PrepareBootImage(/* force */ true)) {
                 LOG(ERROR) << "Forced boot image creating failed. Original error return was "
                         << dexopt_result;
@@ -854,73 +608,18 @@ private:
 
         // If this was a profile-guided run, we may have profile version issues. Try to downgrade,
         // if possible.
-        if ((package_parameters_.dexopt_flags & DEXOPT_PROFILE_GUIDED) == 0) {
+        if ((parameters_.dexopt_flags & DEXOPT_PROFILE_GUIDED) == 0) {
             return dexopt_result;
         }
 
         LOG(WARNING) << "Downgrading compiler filter in an attempt to progress compilation";
-        package_parameters_.dexopt_flags &= ~DEXOPT_PROFILE_GUIDED;
+        parameters_.dexopt_flags &= ~DEXOPT_PROFILE_GUIDED;
         return Dexopt();
     }
 
     ////////////////////////////////////
     // Helpers, mostly taken from ART //
     ////////////////////////////////////
-
-    // Wrapper on fork/execv to run a command in a subprocess.
-    static bool Exec(const std::vector<std::string>& arg_vector, std::string* error_msg) {
-        const std::string command_line = Join(arg_vector, ' ');
-
-        CHECK_GE(arg_vector.size(), 1U) << command_line;
-
-        // Convert the args to char pointers.
-        const char* program = arg_vector[0].c_str();
-        std::vector<char*> args;
-        for (size_t i = 0; i < arg_vector.size(); ++i) {
-            const std::string& arg = arg_vector[i];
-            char* arg_str = const_cast<char*>(arg.c_str());
-            CHECK(arg_str != nullptr) << i;
-            args.push_back(arg_str);
-        }
-        args.push_back(nullptr);
-
-        // Fork and exec.
-        pid_t pid = fork();
-        if (pid == 0) {
-            // No allocation allowed between fork and exec.
-
-            // Change process groups, so we don't get reaped by ProcessManager.
-            setpgid(0, 0);
-
-            execv(program, &args[0]);
-
-            PLOG(ERROR) << "Failed to execv(" << command_line << ")";
-            // _exit to avoid atexit handlers in child.
-            _exit(1);
-        } else {
-            if (pid == -1) {
-                *error_msg = StringPrintf("Failed to execv(%s) because fork failed: %s",
-                        command_line.c_str(), strerror(errno));
-                return false;
-            }
-
-            // wait for subprocess to finish
-            int status;
-            pid_t got_pid = TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
-            if (got_pid != pid) {
-                *error_msg = StringPrintf("Failed after fork for execv(%s) because waitpid failed: "
-                        "wanted %d, got %d: %s",
-                        command_line.c_str(), pid, got_pid, strerror(errno));
-                return false;
-            }
-            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                *error_msg = StringPrintf("Failed execv(%s) because non-0 exit status",
-                        command_line.c_str());
-                return false;
-            }
-        }
-        return true;
-    }
 
     // Choose a random relocation offset. Taken from art/runtime/gc/image_space.cc.
     static int32_t ChooseRelocationOffsetDelta(int32_t min_delta, int32_t max_delta) {
@@ -984,13 +683,12 @@ private:
     SystemProperties system_properties_;
 
     // Some select properties that are always needed.
-    std::string target_slot_;
     std::string android_root_;
     std::string android_data_;
     std::string boot_classpath_;
     std::string asec_mountpoint_;
 
-    Parameters package_parameters_;
+    OTAPreoptParameters parameters_;
 
     // Store environment values we need to set.
     std::vector<std::string> environ_;

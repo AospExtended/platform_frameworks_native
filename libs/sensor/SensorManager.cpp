@@ -27,6 +27,7 @@
 #include <utils/Singleton.h>
 
 #include <binder/IBinder.h>
+#include <binder/IPermissionController.h>
 #include <binder/IServiceManager.h>
 
 #include <sensor/ISensorServer.h>
@@ -61,7 +62,7 @@ SensorManager& SensorManager::getInstanceForPackage(const String16& packageName)
         // to the wrong package and stats based on app ops may be slightly off.
         if (opPackageName.size() <= 0) {
             sp<IBinder> binder = defaultServiceManager()->getService(String16("permission"));
-            if (binder != 0) {
+            if (binder != nullptr) {
                 const uid_t uid = IPCThreadState::self()->getCallingUid();
                 Vector<String16> packages;
                 interface_cast<IPermissionController>(binder)->getPackagesForUid(uid, packages);
@@ -92,7 +93,7 @@ SensorManager& SensorManager::getInstanceForPackage(const String16& packageName)
 }
 
 SensorManager::SensorManager(const String16& opPackageName)
-    : mSensorList(0), mOpPackageName(opPackageName), mDirectConnectionHandle(1) {
+    : mSensorList(nullptr), mOpPackageName(opPackageName), mDirectConnectionHandle(1) {
     Mutex::Autolock _l(mLock);
     assertStateLocked();
 }
@@ -127,13 +128,13 @@ void SensorManager::sensorManagerDied() {
     Mutex::Autolock _l(mLock);
     mSensorServer.clear();
     free(mSensorList);
-    mSensorList = NULL;
+    mSensorList = nullptr;
     mSensors.clear();
 }
 
 status_t SensorManager::assertStateLocked() {
     bool initSensorManager = false;
-    if (mSensorServer == NULL) {
+    if (mSensorServer == nullptr) {
         initSensorManager = true;
     } else {
         // Ping binder to check if sensorservice is alive.
@@ -163,7 +164,7 @@ status_t SensorManager::assertStateLocked() {
         size_t count = mSensors.size();
         mSensorList =
                 static_cast<Sensor const**>(malloc(count * sizeof(Sensor*)));
-        LOG_ALWAYS_FATAL_IF(mSensorList == NULL, "mSensorList NULL");
+        LOG_ALWAYS_FATAL_IF(mSensorList == nullptr, "mSensorList NULL");
 
         for (size_t i=0 ; i<count ; i++) {
             mSensorList[i] = mSensors.array() + i;
@@ -221,7 +222,7 @@ Sensor const* SensorManager::getDefaultSensor(int type)
             }
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 sp<SensorEventQueue> SensorManager::createEventQueue(String8 packageName, int mode) {
@@ -231,10 +232,10 @@ sp<SensorEventQueue> SensorManager::createEventQueue(String8 packageName, int mo
     while (assertStateLocked() == NO_ERROR) {
         sp<ISensorEventConnection> connection =
                 mSensorServer->createSensorEventConnection(packageName, mode, mOpPackageName);
-        if (connection == NULL) {
+        if (connection == nullptr) {
             // SensorService just died or the app doesn't have required permissions.
             ALOGE("createEventQueue: connection is NULL.");
-            return NULL;
+            return nullptr;
         }
         queue = new SensorEventQueue(connection);
         break;
@@ -305,12 +306,13 @@ int SensorManager::configureDirectChannel(int channelNativeHandle, int sensorHan
 }
 
 int SensorManager::setOperationParameter(
-        int type, const Vector<float> &floats, const Vector<int32_t> &ints) {
+        int handle, int type,
+        const Vector<float> &floats, const Vector<int32_t> &ints) {
     Mutex::Autolock _l(mLock);
     if (assertStateLocked() != NO_ERROR) {
         return NO_INIT;
     }
-    return mSensorServer->setOperationParameter(type, floats, ints);
+    return mSensorServer->setOperationParameter(handle, type, floats, ints);
 }
 
 // ----------------------------------------------------------------------------

@@ -19,7 +19,8 @@
 #include <android-base/unique_fd.h>
 #include <android/frameworks/vr/composer/1.0/IVrComposerClient.h>
 #include <android/hardware/graphics/composer/2.1/IComposer.h>
-#include <ComposerBase.h>
+#include <composer-hal/2.1/ComposerHal.h>
+#include <private/dvr/vsync_service.h>
 #include <ui/Fence.h>
 #include <ui/GraphicBuffer.h>
 #include <utils/StrongPointer.h>
@@ -46,7 +47,7 @@ namespace dvr {
 class VrComposerClient;
 
 using android::hardware::graphics::common::V1_0::PixelFormat;
-using android::hardware::graphics::composer::V2_1::implementation::ComposerBase;
+using android::hardware::graphics::composer::V2_1::hal::ComposerHal;
 
 class ComposerView {
  public:
@@ -103,6 +104,7 @@ class ComposerView {
 
   virtual ~ComposerView() {}
 
+  virtual void ForceDisplaysRefresh() = 0;
   virtual void RegisterObserver(Observer* observer) = 0;
   virtual void UnregisterObserver(Observer* observer) = 0;
 };
@@ -111,9 +113,9 @@ struct HwcLayer {
   using Composition =
       hardware::graphics::composer::V2_1::IComposerClient::Composition;
 
-  HwcLayer(Layer new_id) {
-    info.id = new_id;
-  }
+  explicit HwcLayer(Layer new_id) { info.id = new_id; }
+
+  void dumpDebugInfo(std::string* result) const;
 
   Composition composition_type;
   ComposerView::ComposerLayer info;
@@ -153,14 +155,14 @@ class HwcDisplay {
   IComposerClient::PowerMode power_mode() const { return power_mode_; }
   void set_power_mode(IComposerClient::PowerMode mode) { power_mode_ = mode; }
 
-  IComposerClient::Vsync vsync_enabled() const { return vsync_enabled_; }
-  void set_vsync_enabled(IComposerClient::Vsync vsync) {
-    vsync_enabled_ = vsync;
-  }
+  bool vsync_enabled() const { return vsync_enabled_; }
+  void set_vsync_enabled(bool vsync) {vsync_enabled_ = vsync;}
 
   const float* color_transform() const { return color_transform_; }
   int32_t color_transform_hint() const { return color_transform_hint_; }
   void SetColorTransform(const float* matrix, int32_t hint);
+
+  void dumpDebugInfo(std::string* result) const;
 
  private:
   // The client target buffer and the associated fence.
@@ -182,7 +184,7 @@ class HwcDisplay {
   Config active_config_;
   ColorMode color_mode_;
   IComposerClient::PowerMode power_mode_;
-  IComposerClient::Vsync vsync_enabled_;
+  bool vsync_enabled_ = false;
   float color_transform_[16];
   int32_t color_transform_hint_;
 
@@ -190,12 +192,10 @@ class HwcDisplay {
   void operator=(const HwcDisplay&) = delete;
 };
 
-class VrHwc : public IComposer, public ComposerBase, public ComposerView {
+class VrHwc : public IComposer, public ComposerHal, public ComposerView {
  public:
   VrHwc();
   ~VrHwc() override;
-
-  bool hasCapability(Capability capability) const;
 
   Error setLayerInfo(Display display, Layer layer, uint32_t type,
                      uint32_t appId);
@@ -205,9 +205,12 @@ class VrHwc : public IComposer, public ComposerBase, public ComposerView {
       Display display, Layer layer,
       const IVrComposerClient::BufferMetadata& metadata);
 
-  // ComposerBase
-  void removeClient() override;
-  void enableCallback(bool enable) override;
+  // ComposerHal
+  bool hasCapability(hwc2_capability_t capability) override;
+
+  std::string dumpDebugInfo() override { return {}; }
+  void registerEventCallback(EventCallback* callback) override;
+  void unregisterEventCallback() override;
 
   uint32_t getMaxVirtualDisplayCount() override;
   Error createVirtualDisplay(uint32_t width, uint32_t height,
@@ -288,14 +291,29 @@ class VrHwc : public IComposer, public ComposerBase, public ComposerView {
   Return<void> createClient(createClient_cb hidl_cb) override;
 
   // ComposerView:
+  void ForceDisplaysRefresh() override;
   void RegisterObserver(Observer* observer) override;
   void UnregisterObserver(Observer* observer) override;
 
  private:
+  class VsyncCallback : public BnVsyncCallback {
+   public:
+    status_t onVsync(int64_t vsync_timestamp) override;
+    void SetEventCallback(EventCallback* callback);
+   private:
+    std::mutex mutex_;
+    EventCallback* callback_;
+  };
+
   HwcDisplay* FindDisplay(Display display);
 
+  // Re-evaluate whether or not we should start making onVsync() callbacks to
+  // the client. We need enableCallback(true) to have been called, and
+  // setVsyncEnabled() to have been called for the primary display. The caller
+  // must have mutex_ locked already.
+  void UpdateVsyncCallbackEnabledLocked();
+
   wp<VrComposerClient> client_;
-  sp<IComposerCallback> callbacks_;
 
   // Guard access to internal state from binder threads.
   std::mutex mutex_;
@@ -303,18 +321,14 @@ class VrHwc : public IComposer, public ComposerBase, public ComposerView {
   std::unordered_map<Display, std::unique_ptr<HwcDisplay>> displays_;
   Display display_count_ = 2;
 
+  EventCallback* event_callback_ = nullptr;
   Observer* observer_ = nullptr;
+
+  sp<VsyncCallback> vsync_callback_;
 
   VrHwc(const VrHwc&) = delete;
   void operator=(const VrHwc&) = delete;
 };
-
-
-ComposerView* GetComposerViewFromIComposer(
-    hardware::graphics::composer::V2_1::IComposer* composer);
-
-hardware::graphics::composer::V2_1::IComposer* HIDL_FETCH_IComposer(
-    const char* name);
 
 }  // namespace dvr
 }  // namespace android

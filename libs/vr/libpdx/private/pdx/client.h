@@ -49,6 +49,7 @@ class Client {
 
   // Returns a reference to IPC channel handle.
   LocalChannelHandle& GetChannelHandle();
+  const LocalChannelHandle& GetChannelHandle() const;
 
  protected:
   friend Transaction;
@@ -205,7 +206,7 @@ class ClientBase : public ParentClient {
 class Transaction final : public OutputResourceMapper,
                           public InputResourceMapper {
  public:
-  Transaction(Client& client);
+  explicit Transaction(Client& client);
   ~Transaction();
 
   template <typename T>

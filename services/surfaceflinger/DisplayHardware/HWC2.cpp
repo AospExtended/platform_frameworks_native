@@ -26,56 +26,19 @@
 #include <ui/Fence.h>
 #include <ui/FloatRect.h>
 #include <ui/GraphicBuffer.h>
-#include <ui/Region.h>
 
 #include <android/configuration.h>
 
-#include <algorithm>
 #include <inttypes.h>
-
-extern "C" {
-    static void hotplug_hook(hwc2_callback_data_t callbackData,
-            hwc2_display_t displayId, int32_t intConnected) {
-        auto device = static_cast<HWC2::Device*>(callbackData);
-        auto display = device->getDisplayById(displayId);
-        if (display) {
-            auto connected = static_cast<HWC2::Connection>(intConnected);
-            device->callHotplug(std::move(display), connected);
-        } else {
-            ALOGE("Hotplug callback called with unknown display %" PRIu64,
-                    displayId);
-        }
-    }
-
-    static void refresh_hook(hwc2_callback_data_t callbackData,
-            hwc2_display_t displayId) {
-        auto device = static_cast<HWC2::Device*>(callbackData);
-        auto display = device->getDisplayById(displayId);
-        if (display) {
-            device->callRefresh(std::move(display));
-        } else {
-            ALOGE("Refresh callback called with unknown display %" PRIu64,
-                    displayId);
-        }
-    }
-
-    static void vsync_hook(hwc2_callback_data_t callbackData,
-            hwc2_display_t displayId, int64_t timestamp) {
-        auto device = static_cast<HWC2::Device*>(callbackData);
-        auto display = device->getDisplayById(displayId);
-        if (display) {
-            device->callVsync(std::move(display), timestamp);
-        } else {
-            ALOGE("Vsync callback called with unknown display %" PRIu64,
-                    displayId);
-        }
-    }
-}
+#include <algorithm>
+#include <iterator>
+#include <set>
 
 using android::Fence;
 using android::FloatRect;
 using android::GraphicBuffer;
 using android::HdrCapabilities;
+using android::HdrMetadata;
 using android::Rect;
 using android::Region;
 using android::sp;
@@ -85,52 +48,67 @@ using android::hardware::Void;
 namespace HWC2 {
 
 namespace Hwc2 = android::Hwc2;
+using android::ui::ColorMode;
+using android::ui::Dataspace;
+using android::ui::PixelFormat;
+using android::ui::RenderIntent;
+
+namespace {
+
+inline bool hasMetadataKey(const std::set<Hwc2::PerFrameMetadataKey>& keys,
+                           const Hwc2::PerFrameMetadataKey& key) {
+    return keys.find(key) != keys.end();
+}
+
+class ComposerCallbackBridge : public Hwc2::IComposerCallback {
+public:
+    ComposerCallbackBridge(ComposerCallback* callback, int32_t sequenceId)
+            : mCallback(callback), mSequenceId(sequenceId) {}
+
+    Return<void> onHotplug(Hwc2::Display display,
+                           IComposerCallback::Connection conn) override
+    {
+        HWC2::Connection connection = static_cast<HWC2::Connection>(conn);
+        mCallback->onHotplugReceived(mSequenceId, display, connection);
+        return Void();
+    }
+
+    Return<void> onRefresh(Hwc2::Display display) override
+    {
+        mCallback->onRefreshReceived(mSequenceId, display);
+        return Void();
+    }
+
+    Return<void> onVsync(Hwc2::Display display, int64_t timestamp) override
+    {
+        mCallback->onVsyncReceived(mSequenceId, display, timestamp);
+        return Void();
+    }
+
+private:
+    ComposerCallback* mCallback;
+    int32_t mSequenceId;
+};
+
+} // namespace anonymous
+
 
 // Device methods
 
-Device::Device(bool useVrComposer)
-  : mComposer(std::make_unique<Hwc2::Composer>(useVrComposer)),
-    mCapabilities(),
-    mDisplays(),
-    mHotplug(),
-    mPendingHotplugs(),
-    mRefresh(),
-    mPendingRefreshes(),
-    mVsync(),
-    mPendingVsyncs()
-{
+Device::Device(std::unique_ptr<android::Hwc2::Composer> composer) : mComposer(std::move(composer)) {
     loadCapabilities();
-    registerCallbacks();
 }
 
-Device::~Device()
-{
-    for (auto element : mDisplays) {
-        auto display = element.second.lock();
-        if (!display) {
-            ALOGE("~Device: Found a display (%" PRId64 " that has already been"
-                    " destroyed", element.first);
-            continue;
-        }
-
-        DisplayType displayType = HWC2::DisplayType::Invalid;
-        auto error = display->getType(&displayType);
-        if (error != Error::None) {
-            ALOGE("~Device: Failed to determine type of display %" PRIu64
-                    ": %s (%d)", display->getId(), to_string(error).c_str(),
-                    static_cast<int32_t>(error));
-            continue;
-        }
-
-        if (displayType == HWC2::DisplayType::Physical) {
-            error = display->setVsyncEnabled(HWC2::Vsync::Disable);
-            if (error != Error::None) {
-                ALOGE("~Device: Failed to disable vsync for display %" PRIu64
-                        ": %s (%d)", display->getId(), to_string(error).c_str(),
-                        static_cast<int32_t>(error));
-            }
-        }
+void Device::registerCallback(ComposerCallback* callback, int32_t sequenceId) {
+    if (mRegisteredCallback) {
+        ALOGW("Callback already registered. Ignored extra registration "
+                "attempt.");
+        return;
     }
+    mRegisteredCallback = true;
+    sp<ComposerCallbackBridge> callbackBridge(
+            new ComposerCallbackBridge(callback, sequenceId));
+    mComposer->registerCallback(callbackBridge);
 }
 
 // Required by HWC2 device
@@ -145,118 +123,86 @@ uint32_t Device::getMaxVirtualDisplayCount() const
     return mComposer->getMaxVirtualDisplayCount();
 }
 
+Error Device::getDisplayIdentificationData(hwc2_display_t hwcDisplayId, uint8_t* outPort,
+                                           std::vector<uint8_t>* outData) const {
+    auto intError = mComposer->getDisplayIdentificationData(hwcDisplayId, outPort, outData);
+    return static_cast<Error>(intError);
+}
+
 Error Device::createVirtualDisplay(uint32_t width, uint32_t height,
-        android_pixel_format_t* format, std::shared_ptr<Display>* outDisplay)
+        PixelFormat* format, Display** outDisplay)
 {
     ALOGI("Creating virtual display");
 
     hwc2_display_t displayId = 0;
-    auto intFormat = static_cast<Hwc2::PixelFormat>(*format);
     auto intError = mComposer->createVirtualDisplay(width, height,
-            &intFormat, &displayId);
+            format, &displayId);
     auto error = static_cast<Error>(intError);
     if (error != Error::None) {
         return error;
     }
 
+    auto display = std::make_unique<impl::Display>(*mComposer.get(), mCapabilities, displayId,
+                                                   DisplayType::Virtual);
+    display->setConnected(true);
+    *outDisplay = display.get();
+    mDisplays.emplace(displayId, std::move(display));
     ALOGI("Created virtual display");
-    *format = static_cast<android_pixel_format_t>(intFormat);
-    *outDisplay = getDisplayById(displayId);
-    if (!*outDisplay) {
-        ALOGE("Failed to get display by id");
-        return Error::BadDisplay;
-    }
-    (*outDisplay)->setConnected(true);
     return Error::None;
 }
 
-void Device::registerHotplugCallback(HotplugCallback hotplug)
+void Device::destroyDisplay(hwc2_display_t displayId)
 {
-    ALOGV("registerHotplugCallback");
-    mHotplug = hotplug;
-    for (auto& pending : mPendingHotplugs) {
-        auto& display = pending.first;
-        auto connected = pending.second;
-        ALOGV("Sending pending hotplug(%" PRIu64 ", %s)", display->getId(),
-                to_string(connected).c_str());
-        mHotplug(std::move(display), connected);
-    }
+    ALOGI("Destroying display %" PRIu64, displayId);
+    mDisplays.erase(displayId);
 }
 
-void Device::registerRefreshCallback(RefreshCallback refresh)
-{
-    mRefresh = refresh;
-    for (auto& pending : mPendingRefreshes) {
-        mRefresh(std::move(pending));
-    }
-}
-
-void Device::registerVsyncCallback(VsyncCallback vsync)
-{
-    mVsync = vsync;
-    for (auto& pending : mPendingVsyncs) {
-        auto& display = pending.first;
-        auto timestamp = pending.second;
-        mVsync(std::move(display), timestamp);
-    }
-}
-
-// For use by Device callbacks
-
-void Device::callHotplug(std::shared_ptr<Display> display, Connection connected)
-{
-    if (connected == Connection::Connected) {
-        if (!display->isConnected()) {
-            mComposer->setClientTargetSlotCount(display->getId());
-            display->loadConfigs();
-            display->setConnected(true);
+void Device::onHotplug(hwc2_display_t displayId, Connection connection) {
+    if (connection == Connection::Connected) {
+        // If we get a hotplug connected event for a display we already have,
+        // destroy the display and recreate it. This will force us to requery
+        // the display params and recreate all layers on that display.
+        auto oldDisplay = getDisplayById(displayId);
+        if (oldDisplay != nullptr && oldDisplay->isConnected()) {
+            ALOGI("Hotplug connecting an already connected display."
+                    " Clearing old display state.");
         }
-    } else {
-        display->setConnected(false);
-        mDisplays.erase(display->getId());
-    }
+        mDisplays.erase(displayId);
 
-    if (mHotplug) {
-        mHotplug(std::move(display), connected);
-    } else {
-        ALOGV("callHotplug called, but no valid callback registered, storing");
-        mPendingHotplugs.emplace_back(std::move(display), connected);
-    }
-}
+        DisplayType displayType;
+        auto intError = mComposer->getDisplayType(displayId,
+                reinterpret_cast<Hwc2::IComposerClient::DisplayType *>(
+                        &displayType));
+        auto error = static_cast<Error>(intError);
+        if (error != Error::None) {
+            ALOGE("getDisplayType(%" PRIu64 ") failed: %s (%d). "
+                    "Aborting hotplug attempt.",
+                    displayId, to_string(error).c_str(), intError);
+            return;
+        }
 
-void Device::callRefresh(std::shared_ptr<Display> display)
-{
-    if (mRefresh) {
-        mRefresh(std::move(display));
-    } else {
-        ALOGV("callRefresh called, but no valid callback registered, storing");
-        mPendingRefreshes.emplace_back(std::move(display));
-    }
-}
-
-void Device::callVsync(std::shared_ptr<Display> display, nsecs_t timestamp)
-{
-    if (mVsync) {
-        mVsync(std::move(display), timestamp);
-    } else {
-        ALOGV("callVsync called, but no valid callback registered, storing");
-        mPendingVsyncs.emplace_back(std::move(display), timestamp);
+        auto newDisplay = std::make_unique<impl::Display>(*mComposer.get(), mCapabilities,
+                                                          displayId, displayType);
+        newDisplay->setConnected(true);
+        mDisplays.emplace(displayId, std::move(newDisplay));
+    } else if (connection == Connection::Disconnected) {
+        // The display will later be destroyed by a call to
+        // destroyDisplay(). For now we just mark it disconnected.
+        auto display = getDisplayById(displayId);
+        if (display) {
+            display->setConnected(false);
+        } else {
+            ALOGW("Attempted to disconnect unknown display %" PRIu64,
+                  displayId);
+        }
     }
 }
 
 // Other Device methods
 
-std::shared_ptr<Display> Device::getDisplayById(hwc2_display_t id) {
-    if (mDisplays.count(id) != 0) {
-        auto strongDisplay = mDisplays[id].lock();
-        ALOGE_IF(!strongDisplay, "Display %" PRId64 " is in mDisplays but is no"
-                " longer alive", id);
-        return strongDisplay;
-    }
-
-    auto display = std::make_shared<Display>(*this, id);
-    mDisplays.emplace(id, display);
-    return display;
+Display* Device::getDisplayById(hwc2_display_t id) {
+    auto iter = mDisplays.find(id);
+    return iter == mDisplays.end() ? nullptr : iter->second.get();
 }
 
 // Device initialization methods
@@ -271,98 +217,25 @@ void Device::loadCapabilities()
     }
 }
 
-bool Device::hasCapability(HWC2::Capability capability) const
+Error Device::flushCommands()
 {
-    return std::find(mCapabilities.cbegin(), mCapabilities.cend(),
-            capability) != mCapabilities.cend();
-}
-
-namespace {
-class ComposerCallback : public Hwc2::IComposerCallback {
-public:
-    ComposerCallback(Device* device) : mDevice(device) {}
-
-    Return<void> onHotplug(Hwc2::Display display,
-            Connection connected) override
-    {
-        hotplug_hook(mDevice, display, static_cast<int32_t>(connected));
-        return Void();
-    }
-
-    Return<void> onRefresh(Hwc2::Display display) override
-    {
-        refresh_hook(mDevice, display);
-        return Void();
-    }
-
-    Return<void> onVsync(Hwc2::Display display, int64_t timestamp) override
-    {
-        vsync_hook(mDevice, display, timestamp);
-        return Void();
-    }
-
-private:
-    Device* mDevice;
-};
-} // namespace anonymous
-
-void Device::registerCallbacks()
-{
-    sp<ComposerCallback> callback = new ComposerCallback(this);
-    mComposer->registerCallback(callback);
-}
-
-
-// For use by Display
-
-void Device::destroyVirtualDisplay(hwc2_display_t display)
-{
-    ALOGI("Destroying virtual display");
-    auto intError = mComposer->destroyVirtualDisplay(display);
-    auto error = static_cast<Error>(intError);
-    ALOGE_IF(error != Error::None, "destroyVirtualDisplay(%" PRIu64 ") failed:"
-            " %s (%d)", display, to_string(error).c_str(), intError);
-    mDisplays.erase(display);
+    return static_cast<Error>(mComposer->executeCommands());
 }
 
 // Display methods
-
-Display::Display(Device& device, hwc2_display_t id)
-  : mDevice(device),
-    mId(id),
-    mIsConnected(false),
-    mType(DisplayType::Invalid)
-{
-    ALOGV("Created display %" PRIu64, id);
-
-    auto intError = mDevice.mComposer->getDisplayType(mId,
-            reinterpret_cast<Hwc2::IComposerClient::DisplayType *>(&mType));
-    auto error = static_cast<Error>(intError);
-    if (error != Error::None) {
-        ALOGE("getDisplayType(%" PRIu64 ") failed: %s (%d)",
-              id, to_string(error).c_str(), intError);
-    }
-}
-
-Display::~Display()
-{
-    ALOGV("Destroyed display %" PRIu64, mId);
-    if (mType == DisplayType::Virtual) {
-        mDevice.destroyVirtualDisplay(mId);
-    }
-}
+Display::~Display() = default;
 
 Display::Config::Config(Display& display, hwc2_config_t id)
-  : mDisplay(display),
-    mId(id),
-    mWidth(-1),
-    mHeight(-1),
-    mVsyncPeriod(-1),
-    mDpiX(-1),
-    mDpiY(-1) {}
+      : mDisplay(display),
+        mId(id),
+        mWidth(-1),
+        mHeight(-1),
+        mVsyncPeriod(-1),
+        mDpiX(-1),
+        mDpiY(-1) {}
 
 Display::Config::Builder::Builder(Display& display, hwc2_config_t id)
-  : mConfig(new Config(display, id)) {}
+      : mConfig(new Config(display, id)) {}
 
 float Display::Config::Builder::getDefaultDensity() {
     // Default density is based on TVs: 1080p displays get XHIGH density, lower-
@@ -379,26 +252,66 @@ float Display::Config::Builder::getDefaultDensity() {
     }
 }
 
-// Required by HWC2 display
+namespace impl {
+Display::Display(android::Hwc2::Composer& composer,
+                 const std::unordered_set<Capability>& capabilities, hwc2_display_t id,
+                 DisplayType type)
+      : mComposer(composer),
+        mCapabilities(capabilities),
+        mId(id),
+        mIsConnected(false),
+        mType(type) {
+    ALOGV("Created display %" PRIu64, id);
+}
 
+Display::~Display() {
+    mLayers.clear();
+
+    if (mType == DisplayType::Virtual) {
+        ALOGV("Destroying virtual display");
+        auto intError = mComposer.destroyVirtualDisplay(mId);
+        auto error = static_cast<Error>(intError);
+        ALOGE_IF(error != Error::None, "destroyVirtualDisplay(%" PRIu64
+                ") failed: %s (%d)", mId, to_string(error).c_str(), intError);
+    } else if (mType == DisplayType::Physical) {
+        auto error = setVsyncEnabled(HWC2::Vsync::Disable);
+        if (error != Error::None) {
+            ALOGE("~Display: Failed to disable vsync for display %" PRIu64
+                    ": %s (%d)", mId, to_string(error).c_str(),
+                    static_cast<int32_t>(error));
+        }
+    }
+}
+
+// Required by HWC2 display
 Error Display::acceptChanges()
 {
-    auto intError = mDevice.mComposer->acceptDisplayChanges(mId);
+    auto intError = mComposer.acceptDisplayChanges(mId);
     return static_cast<Error>(intError);
 }
 
-Error Display::createLayer(std::shared_ptr<Layer>* outLayer)
-{
+Error Display::createLayer(HWC2::Layer** outLayer) {
+    if (!outLayer) {
+        return Error::BadParameter;
+    }
     hwc2_layer_t layerId = 0;
-    auto intError = mDevice.mComposer->createLayer(mId, &layerId);
+    auto intError = mComposer.createLayer(mId, &layerId);
     auto error = static_cast<Error>(intError);
     if (error != Error::None) {
         return error;
     }
 
-    auto layer = std::make_shared<Layer>(shared_from_this(), layerId);
-    mLayers.emplace(layerId, layer);
-    *outLayer = std::move(layer);
+    auto layer = std::make_unique<impl::Layer>(mComposer, mCapabilities, mId, layerId);
+    *outLayer = layer.get();
+    mLayers.emplace(layerId, std::move(layer));
+    return Error::None;
+}
+
+Error Display::destroyLayer(HWC2::Layer* layer) {
+    if (!layer) {
+        return Error::BadParameter;
+    }
+    mLayers.erase(layer->getId());
     return Error::None;
 }
 
@@ -407,7 +320,7 @@ Error Display::getActiveConfig(
 {
     ALOGV("[%" PRIu64 "] getActiveConfig", mId);
     hwc2_config_t configId = 0;
-    auto intError = mDevice.mComposer->getActiveConfig(mId, &configId);
+    auto intError = mComposer.getActiveConfig(mId, &configId);
     auto error = static_cast<Error>(intError);
 
     if (error != Error::None) {
@@ -429,13 +342,36 @@ Error Display::getActiveConfig(
     return Error::None;
 }
 
-Error Display::getChangedCompositionTypes(
-        std::unordered_map<std::shared_ptr<Layer>, Composition>* outTypes)
-{
+Error Display::getActiveConfigIndex(int* outIndex) const {
+    ALOGV("[%" PRIu64 "] getActiveConfigIndex", mId);
+    hwc2_config_t configId = 0;
+    auto intError = mComposer.getActiveConfig(mId, &configId);
+    auto error = static_cast<Error>(intError);
+
+    if (error != Error::None) {
+        ALOGE("Unable to get active config for mId:[%" PRIu64 "]", mId);
+        *outIndex = -1;
+        return error;
+    }
+
+    auto pos = mConfigs.find(configId);
+    if (pos != mConfigs.end()) {
+        *outIndex = std::distance(mConfigs.begin(), pos);
+    } else {
+        ALOGE("[%" PRIu64 "] getActiveConfig returned unknown config %u", mId, configId);
+        // Return no error, but the caller needs to check for a negative index
+        // to detect this case
+        *outIndex = -1;
+    }
+
+    return Error::None;
+}
+
+Error Display::getChangedCompositionTypes(std::unordered_map<HWC2::Layer*, Composition>* outTypes) {
     std::vector<Hwc2::Layer> layerIds;
     std::vector<Hwc2::IComposerClient::Composition> types;
-    auto intError = mDevice.mComposer->getChangedCompositionTypes(mId,
-            &layerIds, &types);
+    auto intError = mComposer.getChangedCompositionTypes(
+            mId, &layerIds, &types);
     uint32_t numElements = layerIds.size();
     auto error = static_cast<Error>(intError);
     error = static_cast<Error>(intError);
@@ -461,21 +397,60 @@ Error Display::getChangedCompositionTypes(
     return Error::None;
 }
 
-Error Display::getColorModes(std::vector<android_color_mode_t>* outModes) const
+Error Display::getColorModes(std::vector<ColorMode>* outModes) const
 {
-    std::vector<Hwc2::ColorMode> modes;
-    auto intError = mDevice.mComposer->getColorModes(mId, &modes);
-    uint32_t numModes = modes.size();
-    auto error = static_cast<Error>(intError);
-    if (error != Error::None) {
-        return error;
+    auto intError = mComposer.getColorModes(mId, outModes);
+    return static_cast<Error>(intError);
+}
+
+int32_t Display::getSupportedPerFrameMetadata() const
+{
+    int32_t supportedPerFrameMetadata = 0;
+
+    std::vector<Hwc2::PerFrameMetadataKey> tmpKeys = mComposer.getPerFrameMetadataKeys(mId);
+    std::set<Hwc2::PerFrameMetadataKey> keys(tmpKeys.begin(), tmpKeys.end());
+
+    // Check whether a specific metadata type is supported. A metadata type is considered
+    // supported if and only if all required fields are supported.
+
+    // SMPTE2086
+    if (hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_RED_PRIMARY_X) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_RED_PRIMARY_Y) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_GREEN_PRIMARY_X) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_GREEN_PRIMARY_Y) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_BLUE_PRIMARY_X) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::DISPLAY_BLUE_PRIMARY_Y) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::WHITE_POINT_X) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::WHITE_POINT_Y) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::MAX_LUMINANCE) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::MIN_LUMINANCE)) {
+        supportedPerFrameMetadata |= HdrMetadata::Type::SMPTE2086;
+    }
+    // CTA861_3
+    if (hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::MAX_CONTENT_LIGHT_LEVEL) &&
+        hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::MAX_FRAME_AVERAGE_LIGHT_LEVEL)) {
+        supportedPerFrameMetadata |= HdrMetadata::Type::CTA861_3;
     }
 
-    outModes->resize(numModes);
-    for (size_t i = 0; i < numModes; i++) {
-        (*outModes)[i] = static_cast<android_color_mode_t>(modes[i]);
+    // HDR10PLUS
+    if (hasMetadataKey(keys, Hwc2::PerFrameMetadataKey::HDR10_PLUS_SEI)) {
+        supportedPerFrameMetadata |= HdrMetadata::Type::HDR10PLUS;
     }
-    return Error::None;
+
+    return supportedPerFrameMetadata;
+}
+
+Error Display::getRenderIntents(ColorMode colorMode,
+        std::vector<RenderIntent>* outRenderIntents) const
+{
+    auto intError = mComposer.getRenderIntents(mId, colorMode, outRenderIntents);
+    return static_cast<Error>(intError);
+}
+
+Error Display::getDataspaceSaturationMatrix(Dataspace dataspace, android::mat4* outMatrix)
+{
+    auto intError = mComposer.getDataspaceSaturationMatrix(dataspace, outMatrix);
+    return static_cast<Error>(intError);
 }
 
 std::vector<std::shared_ptr<const Display::Config>> Display::getConfigs() const
@@ -489,19 +464,17 @@ std::vector<std::shared_ptr<const Display::Config>> Display::getConfigs() const
 
 Error Display::getName(std::string* outName) const
 {
-    auto intError = mDevice.mComposer->getDisplayName(mId, outName);
+    auto intError = mComposer.getDisplayName(mId, outName);
     return static_cast<Error>(intError);
 }
 
 Error Display::getRequests(HWC2::DisplayRequest* outDisplayRequests,
-        std::unordered_map<std::shared_ptr<Layer>, LayerRequest>*
-                outLayerRequests)
-{
+                           std::unordered_map<HWC2::Layer*, LayerRequest>* outLayerRequests) {
     uint32_t intDisplayRequests;
     std::vector<Hwc2::Layer> layerIds;
     std::vector<uint32_t> layerRequests;
-    auto intError = mDevice.mComposer->getDisplayRequests(mId,
-            &intDisplayRequests, &layerIds, &layerRequests);
+    auto intError = mComposer.getDisplayRequests(
+            mId, &intDisplayRequests, &layerIds, &layerRequests);
     uint32_t numElements = layerIds.size();
     auto error = static_cast<Error>(intError);
     if (error != Error::None) {
@@ -532,64 +505,68 @@ Error Display::getType(DisplayType* outType) const
     return Error::None;
 }
 
-Error Display::supportsDoze(bool* outSupport) const
-{
-    bool intSupport = false;
-    auto intError = mDevice.mComposer->getDozeSupport(mId, &intSupport);
-    auto error = static_cast<Error>(intError);
-    if (error != Error::None) {
-        return error;
-    }
-    *outSupport = static_cast<bool>(intSupport);
+Error Display::supportsDoze(bool* outSupport) const {
+    *outSupport = mDisplayCapabilities.count(DisplayCapability::Doze) > 0;
     return Error::None;
 }
 
-Error Display::getHdrCapabilities(
-        std::unique_ptr<HdrCapabilities>* outCapabilities) const
+Error Display::getHdrCapabilities(HdrCapabilities* outCapabilities) const
 {
-    uint32_t numTypes = 0;
     float maxLuminance = -1.0f;
     float maxAverageLuminance = -1.0f;
     float minLuminance = -1.0f;
-    std::vector<Hwc2::Hdr> intTypes;
-    auto intError = mDevice.mComposer->getHdrCapabilities(mId, &intTypes,
+    std::vector<Hwc2::Hdr> types;
+    auto intError = mComposer.getHdrCapabilities(mId, &types,
             &maxLuminance, &maxAverageLuminance, &minLuminance);
     auto error = static_cast<HWC2::Error>(intError);
 
-    std::vector<int32_t> types;
-    for (auto type : intTypes) {
-        types.push_back(static_cast<int32_t>(type));
-    }
-    numTypes = types.size();
     if (error != Error::None) {
         return error;
     }
 
-    *outCapabilities = std::make_unique<HdrCapabilities>(std::move(types),
+    *outCapabilities = HdrCapabilities(std::move(types),
             maxLuminance, maxAverageLuminance, minLuminance);
     return Error::None;
 }
 
-Error Display::getReleaseFences(
-        std::unordered_map<std::shared_ptr<Layer>, sp<Fence>>* outFences) const
-{
+Error Display::getDisplayedContentSamplingAttributes(PixelFormat* outFormat,
+                                                     Dataspace* outDataspace,
+                                                     uint8_t* outComponentMask) const {
+    auto intError = mComposer.getDisplayedContentSamplingAttributes(mId, outFormat, outDataspace,
+                                                                    outComponentMask);
+    return static_cast<Error>(intError);
+}
+
+Error Display::setDisplayContentSamplingEnabled(bool enabled, uint8_t componentMask,
+                                                uint64_t maxFrames) const {
+    auto intError =
+            mComposer.setDisplayContentSamplingEnabled(mId, enabled, componentMask, maxFrames);
+    return static_cast<Error>(intError);
+}
+
+Error Display::getDisplayedContentSample(uint64_t maxFrames, uint64_t timestamp,
+                                         android::DisplayedFrameStats* outStats) const {
+    auto intError = mComposer.getDisplayedContentSample(mId, maxFrames, timestamp, outStats);
+    return static_cast<Error>(intError);
+}
+
+Error Display::getReleaseFences(std::unordered_map<HWC2::Layer*, sp<Fence>>* outFences) const {
     std::vector<Hwc2::Layer> layerIds;
     std::vector<int> fenceFds;
-    auto intError = mDevice.mComposer->getReleaseFences(mId,
-            &layerIds, &fenceFds);
+    auto intError = mComposer.getReleaseFences(mId, &layerIds, &fenceFds);
     auto error = static_cast<Error>(intError);
     uint32_t numElements = layerIds.size();
     if (error != Error::None) {
         return error;
     }
 
-    std::unordered_map<std::shared_ptr<Layer>, sp<Fence>> releaseFences;
+    std::unordered_map<HWC2::Layer*, sp<Fence>> releaseFences;
     releaseFences.reserve(numElements);
     for (uint32_t element = 0; element < numElements; ++element) {
         auto layer = getLayerById(layerIds[element]);
         if (layer) {
             sp<Fence> fence(new Fence(fenceFds[element]));
-            releaseFences.emplace(std::move(layer), fence);
+            releaseFences.emplace(layer, fence);
         } else {
             ALOGE("getReleaseFences: invalid layer %" PRIu64
                     " found on display %" PRIu64, layerIds[element], mId);
@@ -607,7 +584,7 @@ Error Display::getReleaseFences(
 Error Display::present(sp<Fence>* outPresentFence)
 {
     int32_t presentFenceFd = -1;
-    auto intError = mDevice.mComposer->presentDisplay(mId, &presentFenceFd);
+    auto intError = mComposer.presentDisplay(mId, &presentFenceFd);
     auto error = static_cast<Error>(intError);
     if (error != Error::None) {
         return error;
@@ -625,32 +602,30 @@ Error Display::setActiveConfig(const std::shared_ptr<const Config>& config)
                 config->getDisplayId(), mId);
         return Error::BadConfig;
     }
-    auto intError = mDevice.mComposer->setActiveConfig(mId, config->getId());
+    auto intError = mComposer.setActiveConfig(mId, config->getId());
     return static_cast<Error>(intError);
 }
 
 Error Display::setClientTarget(uint32_t slot, const sp<GraphicBuffer>& target,
-        const sp<Fence>& acquireFence, android_dataspace_t dataspace)
+        const sp<Fence>& acquireFence, Dataspace dataspace)
 {
     // TODO: Properly encode client target surface damage
     int32_t fenceFd = acquireFence->dup();
-    auto intError = mDevice.mComposer->setClientTarget(mId, slot, target,
-            fenceFd, static_cast<Hwc2::Dataspace>(dataspace),
-            std::vector<Hwc2::IComposerClient::Rect>());
+    auto intError = mComposer.setClientTarget(mId, slot, target,
+            fenceFd, dataspace, std::vector<Hwc2::IComposerClient::Rect>());
     return static_cast<Error>(intError);
 }
 
-Error Display::setColorMode(android_color_mode_t mode)
+Error Display::setColorMode(ColorMode mode, RenderIntent renderIntent)
 {
-    auto intError = mDevice.mComposer->setColorMode(mId,
-            static_cast<Hwc2::ColorMode>(mode));
+    auto intError = mComposer.setColorMode(mId, mode, renderIntent);
     return static_cast<Error>(intError);
 }
 
 Error Display::setColorTransform(const android::mat4& matrix,
         android_color_transform_t hint)
 {
-    auto intError = mDevice.mComposer->setColorTransform(mId,
+    auto intError = mComposer.setColorTransform(mId,
             matrix.asArray(), static_cast<Hwc2::ColorTransform>(hint));
     return static_cast<Error>(intError);
 }
@@ -660,7 +635,7 @@ Error Display::setOutputBuffer(const sp<GraphicBuffer>& buffer,
 {
     int32_t fenceFd = releaseFence->dup();
     auto handle = buffer->getNativeBuffer()->handle;
-    auto intError = mDevice.mComposer->setOutputBuffer(mId, handle, fenceFd);
+    auto intError = mComposer.setOutputBuffer(mId, handle, fenceFd);
     close(fenceFd);
     return static_cast<Error>(intError);
 }
@@ -668,14 +643,37 @@ Error Display::setOutputBuffer(const sp<GraphicBuffer>& buffer,
 Error Display::setPowerMode(PowerMode mode)
 {
     auto intMode = static_cast<Hwc2::IComposerClient::PowerMode>(mode);
-    auto intError = mDevice.mComposer->setPowerMode(mId, intMode);
+    auto intError = mComposer.setPowerMode(mId, intMode);
+
+    if (mode == PowerMode::On) {
+        std::call_once(mDisplayCapabilityQueryFlag, [this]() {
+            std::vector<Hwc2::DisplayCapability> tmpCapabilities;
+            auto error =
+                    static_cast<Error>(mComposer.getDisplayCapabilities(mId, &tmpCapabilities));
+            if (error == Error::None) {
+                for (auto capability : tmpCapabilities) {
+                    mDisplayCapabilities.emplace(static_cast<DisplayCapability>(capability));
+                }
+            } else if (error == Error::Unsupported) {
+                if (mCapabilities.count(Capability::SkipClientColorTransform)) {
+                    mDisplayCapabilities.emplace(DisplayCapability::SkipClientColorTransform);
+                }
+                bool dozeSupport = false;
+                error = static_cast<Error>(mComposer.getDozeSupport(mId, &dozeSupport));
+                if (error == Error::None && dozeSupport) {
+                    mDisplayCapabilities.emplace(DisplayCapability::Doze);
+                }
+            }
+        });
+    }
+
     return static_cast<Error>(intError);
 }
 
 Error Display::setVsyncEnabled(Vsync enabled)
 {
     auto intEnabled = static_cast<Hwc2::IComposerClient::Vsync>(enabled);
-    auto intError = mDevice.mComposer->setVsyncEnabled(mId, intEnabled);
+    auto intError = mComposer.setVsyncEnabled(mId, intEnabled);
     return static_cast<Error>(intError);
 }
 
@@ -683,8 +681,7 @@ Error Display::validate(uint32_t* outNumTypes, uint32_t* outNumRequests)
 {
     uint32_t numTypes = 0;
     uint32_t numRequests = 0;
-    auto intError = mDevice.mComposer->validateDisplay(mId,
-            &numTypes, &numRequests);
+    auto intError = mComposer.validateDisplay(mId, &numTypes, &numRequests);
     auto error = static_cast<Error>(intError);
     if (error != Error::None && error != Error::HasChanges) {
         return error;
@@ -701,7 +698,8 @@ Error Display::presentOrValidate(uint32_t* outNumTypes, uint32_t* outNumRequests
     uint32_t numTypes = 0;
     uint32_t numRequests = 0;
     int32_t presentFenceFd = -1;
-    auto intError = mDevice.mComposer->presentOrValidateDisplay(mId, &numTypes, &numRequests, &presentFenceFd, state);
+    auto intError = mComposer.presentOrValidateDisplay(
+            mId, &numTypes, &numRequests, &presentFenceFd, state);
     auto error = static_cast<Error>(intError);
     if (error != Error::None && error != Error::HasChanges) {
         return error;
@@ -718,17 +716,27 @@ Error Display::presentOrValidate(uint32_t* outNumTypes, uint32_t* outNumRequests
     return error;
 }
 
-void Display::discardCommands()
-{
-    mDevice.mComposer->resetCommands();
+Error Display::setDisplayBrightness(float brightness) const {
+    auto intError = mComposer.setDisplayBrightness(mId, brightness);
+    return static_cast<Error>(intError);
 }
 
 // For use by Device
 
+void Display::setConnected(bool connected) {
+    if (!mIsConnected && connected) {
+        mComposer.setClientTargetSlotCount(mId);
+        if (mType == DisplayType::Physical) {
+            loadConfigs();
+        }
+    }
+    mIsConnected = connected;
+}
+
 int32_t Display::getAttribute(hwc2_config_t configId, Attribute attribute)
 {
     int32_t value = 0;
-    auto intError = mDevice.mComposer->getDisplayAttribute(mId, configId,
+    auto intError = mComposer.getDisplayAttribute(mId, configId,
             static_cast<Hwc2::IComposerClient::Attribute>(attribute),
             &value);
     auto error = static_cast<Error>(intError);
@@ -760,7 +768,7 @@ void Display::loadConfigs()
     ALOGV("[%" PRIu64 "] loadConfigs", mId);
 
     std::vector<Hwc2::Config> configIds;
-    auto intError = mDevice.mComposer->getDisplayConfigs(mId, &configIds);
+    auto intError = mComposer.getDisplayConfigs(mId, &configIds);
     auto error = static_cast<Error>(intError);
     if (error != Error::None) {
         ALOGE("[%" PRIu64 "] getDisplayConfigs [2] failed: %s (%d)", mId,
@@ -773,73 +781,76 @@ void Display::loadConfigs()
     }
 }
 
-// For use by Layer
-
-void Display::destroyLayer(hwc2_layer_t layerId)
-{
-    auto intError =mDevice.mComposer->destroyLayer(mId, layerId);
-    auto error = static_cast<Error>(intError);
-    ALOGE_IF(error != Error::None, "destroyLayer(%" PRIu64 ", %" PRIu64 ")"
-            " failed: %s (%d)", mId, layerId, to_string(error).c_str(),
-            intError);
-    mLayers.erase(layerId);
-}
-
 // Other Display methods
 
-std::shared_ptr<Layer> Display::getLayerById(hwc2_layer_t id) const
-{
+HWC2::Layer* Display::getLayerById(hwc2_layer_t id) const {
     if (mLayers.count(id) == 0) {
         return nullptr;
     }
 
-    auto layer = mLayers.at(id).lock();
-    return layer;
+    return mLayers.at(id).get();
 }
+} // namespace impl
 
 // Layer methods
 
-Layer::Layer(const std::shared_ptr<Display>& display, hwc2_layer_t id)
-  : mDisplay(display),
-    mDisplayId(display->getId()),
-    mDevice(display->getDevice()),
-    mId(id)
+Layer::~Layer() = default;
+
+namespace impl {
+
+Layer::Layer(android::Hwc2::Composer& composer, const std::unordered_set<Capability>& capabilities,
+             hwc2_display_t displayId, hwc2_layer_t layerId)
+  : mComposer(composer),
+    mCapabilities(capabilities),
+    mDisplayId(displayId),
+    mId(layerId),
+    mColorMatrix(android::mat4())
 {
-    ALOGV("Created layer %" PRIu64 " on display %" PRIu64, id,
-            display->getId());
+    ALOGV("Created layer %" PRIu64 " on display %" PRIu64, layerId, displayId);
 }
 
 Layer::~Layer()
 {
-    auto display = mDisplay.lock();
-    if (display) {
-        display->destroyLayer(mId);
-    }
+    auto intError = mComposer.destroyLayer(mDisplayId, mId);
+    auto error = static_cast<Error>(intError);
+    ALOGE_IF(error != Error::None, "destroyLayer(%" PRIu64 ", %" PRIu64 ")"
+            " failed: %s (%d)", mDisplayId, mId, to_string(error).c_str(),
+            intError);
 }
 
 Error Layer::setCursorPosition(int32_t x, int32_t y)
 {
-    auto intError = mDevice.mComposer->setCursorPosition(mDisplayId,
-            mId, x, y);
+    auto intError = mComposer.setCursorPosition(mDisplayId, mId, x, y);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setBuffer(uint32_t slot, const sp<GraphicBuffer>& buffer,
         const sp<Fence>& acquireFence)
 {
+    if (buffer == nullptr && mBufferSlot == slot) {
+        return Error::None;
+    }
+    mBufferSlot = slot;
+
     int32_t fenceFd = acquireFence->dup();
-    auto intError = mDevice.mComposer->setLayerBuffer(mDisplayId,
-            mId, slot, buffer, fenceFd);
+    auto intError = mComposer.setLayerBuffer(mDisplayId, mId, slot, buffer,
+                                             fenceFd);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setSurfaceDamage(const Region& damage)
 {
+    if (damage.isRect() && mDamageRegion.isRect() &&
+        (damage.getBounds() == mDamageRegion.getBounds())) {
+        return Error::None;
+    }
+    mDamageRegion = damage;
+
     // We encode default full-screen damage as INVALID_RECT upstream, but as 0
     // rects for HWC
     Hwc2::Error intError = Hwc2::Error::NONE;
     if (damage.isRect() && damage.getBounds() == Rect::INVALID_RECT) {
-        intError = mDevice.mComposer->setLayerSurfaceDamage(mDisplayId,
+        intError = mComposer.setLayerSurfaceDamage(mDisplayId,
                 mId, std::vector<Hwc2::IComposerClient::Rect>());
     } else {
         size_t rectCount = 0;
@@ -851,8 +862,7 @@ Error Layer::setSurfaceDamage(const Region& damage)
                     rectArray[rect].right, rectArray[rect].bottom});
         }
 
-        intError = mDevice.mComposer->setLayerSurfaceDamage(mDisplayId,
-                mId, hwcRects);
+        intError = mComposer.setLayerSurfaceDamage(mDisplayId, mId, hwcRects);
     }
 
     return static_cast<Error>(intError);
@@ -861,60 +871,115 @@ Error Layer::setSurfaceDamage(const Region& damage)
 Error Layer::setBlendMode(BlendMode mode)
 {
     auto intMode = static_cast<Hwc2::IComposerClient::BlendMode>(mode);
-    auto intError = mDevice.mComposer->setLayerBlendMode(mDisplayId,
-            mId, intMode);
+    auto intError = mComposer.setLayerBlendMode(mDisplayId, mId, intMode);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setColor(hwc_color_t color)
 {
     Hwc2::IComposerClient::Color hwcColor{color.r, color.g, color.b, color.a};
-    auto intError = mDevice.mComposer->setLayerColor(mDisplayId,
-            mId, hwcColor);
+    auto intError = mComposer.setLayerColor(mDisplayId, mId, hwcColor);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setCompositionType(Composition type)
 {
     auto intType = static_cast<Hwc2::IComposerClient::Composition>(type);
-    auto intError = mDevice.mComposer->setLayerCompositionType(mDisplayId,
-            mId, intType);
+    auto intError = mComposer.setLayerCompositionType(
+            mDisplayId, mId, intType);
     return static_cast<Error>(intError);
 }
 
-Error Layer::setDataspace(android_dataspace_t dataspace)
+Error Layer::setDataspace(Dataspace dataspace)
 {
-    auto intDataspace = static_cast<Hwc2::Dataspace>(dataspace);
-    auto intError = mDevice.mComposer->setLayerDataspace(mDisplayId,
-            mId, intDataspace);
+    if (dataspace == mDataSpace) {
+        return Error::None;
+    }
+    mDataSpace = dataspace;
+    auto intError = mComposer.setLayerDataspace(mDisplayId, mId, mDataSpace);
     return static_cast<Error>(intError);
+}
+
+Error Layer::setPerFrameMetadata(const int32_t supportedPerFrameMetadata,
+        const android::HdrMetadata& metadata)
+{
+    if (metadata == mHdrMetadata) {
+        return Error::None;
+    }
+
+    mHdrMetadata = metadata;
+    int validTypes = mHdrMetadata.validTypes & supportedPerFrameMetadata;
+    std::vector<Hwc2::PerFrameMetadata> perFrameMetadatas;
+    if (validTypes & HdrMetadata::SMPTE2086) {
+        perFrameMetadatas.insert(perFrameMetadatas.end(),
+                                 {{Hwc2::PerFrameMetadataKey::DISPLAY_RED_PRIMARY_X,
+                                   mHdrMetadata.smpte2086.displayPrimaryRed.x},
+                                  {Hwc2::PerFrameMetadataKey::DISPLAY_RED_PRIMARY_Y,
+                                   mHdrMetadata.smpte2086.displayPrimaryRed.y},
+                                  {Hwc2::PerFrameMetadataKey::DISPLAY_GREEN_PRIMARY_X,
+                                   mHdrMetadata.smpte2086.displayPrimaryGreen.x},
+                                  {Hwc2::PerFrameMetadataKey::DISPLAY_GREEN_PRIMARY_Y,
+                                   mHdrMetadata.smpte2086.displayPrimaryGreen.y},
+                                  {Hwc2::PerFrameMetadataKey::DISPLAY_BLUE_PRIMARY_X,
+                                   mHdrMetadata.smpte2086.displayPrimaryBlue.x},
+                                  {Hwc2::PerFrameMetadataKey::DISPLAY_BLUE_PRIMARY_Y,
+                                   mHdrMetadata.smpte2086.displayPrimaryBlue.y},
+                                  {Hwc2::PerFrameMetadataKey::WHITE_POINT_X,
+                                   mHdrMetadata.smpte2086.whitePoint.x},
+                                  {Hwc2::PerFrameMetadataKey::WHITE_POINT_Y,
+                                   mHdrMetadata.smpte2086.whitePoint.y},
+                                  {Hwc2::PerFrameMetadataKey::MAX_LUMINANCE,
+                                   mHdrMetadata.smpte2086.maxLuminance},
+                                  {Hwc2::PerFrameMetadataKey::MIN_LUMINANCE,
+                                   mHdrMetadata.smpte2086.minLuminance}});
+    }
+
+    if (validTypes & HdrMetadata::CTA861_3) {
+        perFrameMetadatas.insert(perFrameMetadatas.end(),
+                                 {{Hwc2::PerFrameMetadataKey::MAX_CONTENT_LIGHT_LEVEL,
+                                   mHdrMetadata.cta8613.maxContentLightLevel},
+                                  {Hwc2::PerFrameMetadataKey::MAX_FRAME_AVERAGE_LIGHT_LEVEL,
+                                   mHdrMetadata.cta8613.maxFrameAverageLightLevel}});
+    }
+
+    Error error = static_cast<Error>(
+            mComposer.setLayerPerFrameMetadata(mDisplayId, mId, perFrameMetadatas));
+
+    if (validTypes & HdrMetadata::HDR10PLUS) {
+        std::vector<Hwc2::PerFrameMetadataBlob> perFrameMetadataBlobs;
+        perFrameMetadataBlobs.push_back(
+                {Hwc2::PerFrameMetadataKey::HDR10_PLUS_SEI, mHdrMetadata.hdr10plus});
+        Error setMetadataBlobsError = static_cast<Error>(
+                mComposer.setLayerPerFrameMetadataBlobs(mDisplayId, mId, perFrameMetadataBlobs));
+        if (error == Error::None) {
+            return setMetadataBlobsError;
+        }
+    }
+    return error;
 }
 
 Error Layer::setDisplayFrame(const Rect& frame)
 {
     Hwc2::IComposerClient::Rect hwcRect{frame.left, frame.top,
         frame.right, frame.bottom};
-    auto intError = mDevice.mComposer->setLayerDisplayFrame(mDisplayId,
-            mId, hwcRect);
+    auto intError = mComposer.setLayerDisplayFrame(mDisplayId, mId, hwcRect);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setPlaneAlpha(float alpha)
 {
-    auto intError = mDevice.mComposer->setLayerPlaneAlpha(mDisplayId,
-            mId, alpha);
+    auto intError = mComposer.setLayerPlaneAlpha(mDisplayId, mId, alpha);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setSidebandStream(const native_handle_t* stream)
 {
-    if (!mDevice.hasCapability(Capability::SidebandStream)) {
+    if (mCapabilities.count(Capability::SidebandStream) == 0) {
         ALOGE("Attempted to call setSidebandStream without checking that the "
                 "device supports sideband streams");
         return Error::Unsupported;
     }
-    auto intError = mDevice.mComposer->setLayerSidebandStream(mDisplayId,
-            mId, stream);
+    auto intError = mComposer.setLayerSidebandStream(mDisplayId, mId, stream);
     return static_cast<Error>(intError);
 }
 
@@ -922,21 +987,25 @@ Error Layer::setSourceCrop(const FloatRect& crop)
 {
     Hwc2::IComposerClient::FRect hwcRect{
         crop.left, crop.top, crop.right, crop.bottom};
-    auto intError = mDevice.mComposer->setLayerSourceCrop(mDisplayId,
-            mId, hwcRect);
+    auto intError = mComposer.setLayerSourceCrop(mDisplayId, mId, hwcRect);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setTransform(Transform transform)
 {
     auto intTransform = static_cast<Hwc2::Transform>(transform);
-    auto intError = mDevice.mComposer->setLayerTransform(mDisplayId,
-            mId, intTransform);
+    auto intError = mComposer.setLayerTransform(mDisplayId, mId, intTransform);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setVisibleRegion(const Region& region)
 {
+    if (region.isRect() && mVisibleRegion.isRect() &&
+        (region.getBounds() == mVisibleRegion.getBounds())) {
+        return Error::None;
+    }
+    mVisibleRegion = region;
+
     size_t rectCount = 0;
     auto rectArray = region.getArray(&rectCount);
 
@@ -946,21 +1015,35 @@ Error Layer::setVisibleRegion(const Region& region)
                 rectArray[rect].right, rectArray[rect].bottom});
     }
 
-    auto intError = mDevice.mComposer->setLayerVisibleRegion(mDisplayId,
-            mId, hwcRects);
+    auto intError = mComposer.setLayerVisibleRegion(mDisplayId, mId, hwcRects);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setZOrder(uint32_t z)
 {
-    auto intError = mDevice.mComposer->setLayerZOrder(mDisplayId, mId, z);
+    auto intError = mComposer.setLayerZOrder(mDisplayId, mId, z);
     return static_cast<Error>(intError);
 }
 
 Error Layer::setInfo(uint32_t type, uint32_t appId)
 {
-  auto intError = mDevice.mComposer->setLayerInfo(mDisplayId, mId, type, appId);
+  auto intError = mComposer.setLayerInfo(mDisplayId, mId, type, appId);
   return static_cast<Error>(intError);
 }
 
+// Composer HAL 2.3
+Error Layer::setColorTransform(const android::mat4& matrix) {
+    if (matrix == mColorMatrix) {
+        return Error::None;
+    }
+    auto intError = mComposer.setLayerColorTransform(mDisplayId, mId, matrix.asArray());
+    Error error = static_cast<Error>(intError);
+    if (error != Error::None) {
+        return error;
+    }
+    mColorMatrix = matrix;
+    return error;
+}
+
+} // namespace impl
 } // namespace HWC2

@@ -13,7 +13,7 @@ namespace dvr {
 //
 class VirtualTouchpadService : public BnVirtualTouchpadService {
  public:
-  VirtualTouchpadService(std::unique_ptr<VirtualTouchpad> touchpad)
+  explicit VirtualTouchpadService(std::unique_ptr<VirtualTouchpad> touchpad)
       : touchpad_(std::move(touchpad)), client_pid_(0) {}
   ~VirtualTouchpadService() override;
 
@@ -23,6 +23,7 @@ class VirtualTouchpadService : public BnVirtualTouchpadService {
   binder::Status detach() override;
   binder::Status touch(int touchpad, float x, float y, float pressure) override;
   binder::Status buttonState(int touchpad, int buttons) override;
+  binder::Status scroll(int touchpad, float x, float y) override;
 
   // Implements BBinder::dump().
   status_t dump(int fd, const Vector<String16>& args) override;

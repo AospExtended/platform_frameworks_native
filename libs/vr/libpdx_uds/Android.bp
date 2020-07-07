@@ -13,10 +13,10 @@ cc_library_static {
     srcs: [
         "channel_event_set.cpp",
         "channel_manager.cpp",
+        "channel_parcelable.cpp",
         "client_channel_factory.cpp",
         "client_channel.cpp",
         "ipc_helper.cpp",
-        "service_dispatcher.cpp",
         "service_endpoint.cpp",
     ],
     static_libs: [
@@ -24,7 +24,8 @@ cc_library_static {
         "libbase",
         "libpdx",
     ],
-    whole_static_libs: [
+    shared_libs: [
+        "libbinder",
         "libselinux",
     ],
 }
@@ -53,5 +54,7 @@ cc_test {
         "libcutils",
         "liblog",
         "libutils",
+        "libbinder",
+        "libselinux",
     ],
 }

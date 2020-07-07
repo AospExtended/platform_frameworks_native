@@ -22,6 +22,7 @@
 #include <binder/ProcessState.h>
 #include <configstore/Utils.h>
 #include <cutils/properties.h>
+#include <inttypes.h>
 #include <gui/BufferItemConsumer.h>
 #include <gui/IDisplayEventConnection.h>
 #include <gui/IProducerListener.h>
@@ -41,18 +42,54 @@ using namespace std::chrono_literals;
 // retrieve wide-color and hdr settings from configstore
 using namespace android::hardware::configstore;
 using namespace android::hardware::configstore::V1_0;
+using ui::ColorMode;
+
+using Transaction = SurfaceComposerClient::Transaction;
 
 static bool hasWideColorDisplay =
         getBool<ISurfaceFlingerConfigs, &ISurfaceFlingerConfigs::hasWideColorDisplay>(false);
+
+static bool hasHdrDisplay =
+        getBool<ISurfaceFlingerConfigs, &ISurfaceFlingerConfigs::hasHDRDisplay>(false);
 
 class FakeSurfaceComposer;
 class FakeProducerFrameEventHistory;
 
 static constexpr uint64_t NO_FRAME_INDEX = std::numeric_limits<uint64_t>::max();
 
+class DummySurfaceListener : public SurfaceListener {
+public:
+    DummySurfaceListener(bool enableReleasedCb = false) :
+            mEnableReleaseCb(enableReleasedCb),
+            mBuffersReleased(0) {}
+    virtual ~DummySurfaceListener() = default;
+
+    virtual void onBufferReleased() {
+        mBuffersReleased++;
+    }
+    virtual bool needsReleaseNotify() {
+        return mEnableReleaseCb;
+    }
+    virtual void onBuffersDiscarded(const std::vector<sp<GraphicBuffer>>& buffers) {
+        mDiscardedBuffers.insert(mDiscardedBuffers.end(), buffers.begin(), buffers.end());
+    }
+
+    int getReleaseNotifyCount() const {
+        return mBuffersReleased;
+    }
+    const std::vector<sp<GraphicBuffer>>& getDiscardedBuffers() const {
+        return mDiscardedBuffers;
+    }
+private:
+    // No need to use lock given the test triggers the listener in the same
+    // thread context.
+    bool mEnableReleaseCb;
+    int32_t mBuffersReleased;
+    std::vector<sp<GraphicBuffer>> mDiscardedBuffers;
+};
+
 class SurfaceTest : public ::testing::Test {
 protected:
-
     SurfaceTest() {
         ProcessState::self()->startThreadPool();
     }
@@ -66,26 +103,116 @@ protected:
         mSurfaceControl = mComposerClient->createSurface(
                 String8("Test Surface"), 32, 32, PIXEL_FORMAT_RGBA_8888, 0);
 
-        ASSERT_TRUE(mSurfaceControl != NULL);
+        ASSERT_TRUE(mSurfaceControl != nullptr);
         ASSERT_TRUE(mSurfaceControl->isValid());
 
-        SurfaceComposerClient::openGlobalTransaction();
-        ASSERT_EQ(NO_ERROR, mSurfaceControl->setLayer(0x7fffffff));
-        ASSERT_EQ(NO_ERROR, mSurfaceControl->show());
-        SurfaceComposerClient::closeGlobalTransaction();
+        Transaction t;
+        ASSERT_EQ(NO_ERROR, t.setLayer(mSurfaceControl, 0x7fffffff)
+                .show(mSurfaceControl)
+                .apply());
 
         mSurface = mSurfaceControl->getSurface();
-        ASSERT_TRUE(mSurface != NULL);
+        ASSERT_TRUE(mSurface != nullptr);
     }
 
     virtual void TearDown() {
         mComposerClient->dispose();
     }
 
+    void testSurfaceListener(bool hasSurfaceListener, bool enableReleasedCb,
+            int32_t extraDiscardedBuffers) {
+        sp<IGraphicBufferProducer> producer;
+        sp<IGraphicBufferConsumer> consumer;
+        BufferQueue::createBufferQueue(&producer, &consumer);
+
+        sp<DummyConsumer> dummyConsumer(new DummyConsumer);
+        consumer->consumerConnect(dummyConsumer, false);
+        consumer->setConsumerName(String8("TestConsumer"));
+
+        sp<Surface> surface = new Surface(producer);
+        sp<ANativeWindow> window(surface);
+        sp<DummySurfaceListener> listener;
+        if (hasSurfaceListener) {
+            listener = new DummySurfaceListener(enableReleasedCb);
+        }
+        ASSERT_EQ(OK, surface->connect(
+                NATIVE_WINDOW_API_CPU,
+                /*reportBufferRemoval*/true,
+                /*listener*/listener));
+        const int BUFFER_COUNT = 4 + extraDiscardedBuffers;
+        ASSERT_EQ(NO_ERROR, native_window_set_buffer_count(window.get(), BUFFER_COUNT));
+
+        ANativeWindowBuffer* buffers[BUFFER_COUNT];
+        // Dequeue first to allocate a number of buffers
+        for (int i = 0; i < BUFFER_COUNT; i++) {
+            ASSERT_EQ(NO_ERROR, native_window_dequeue_buffer_and_wait(window.get(), &buffers[i]));
+        }
+        for (int i = 0; i < BUFFER_COUNT; i++) {
+            ASSERT_EQ(NO_ERROR, window->cancelBuffer(window.get(), buffers[i], -1));
+        }
+
+        ANativeWindowBuffer* buffer;
+        // Fill BUFFER_COUNT-1 buffers
+        for (int i = 0; i < BUFFER_COUNT-1; i++) {
+            ASSERT_EQ(NO_ERROR, native_window_dequeue_buffer_and_wait(window.get(), &buffer));
+            ASSERT_EQ(NO_ERROR, window->queueBuffer(window.get(), buffer, -1));
+        }
+
+        // Dequeue 1 buffer
+        ASSERT_EQ(NO_ERROR, native_window_dequeue_buffer_and_wait(window.get(), &buffer));
+
+        // Acquire and free 1+extraDiscardedBuffers buffer, check onBufferReleased is called.
+        std::vector<BufferItem> releasedItems;
+        releasedItems.resize(1+extraDiscardedBuffers);
+        for (int i = 0; i < releasedItems.size(); i++) {
+            ASSERT_EQ(NO_ERROR, consumer->acquireBuffer(&releasedItems[i], 0));
+            ASSERT_EQ(NO_ERROR, consumer->releaseBuffer(releasedItems[i].mSlot,
+                    releasedItems[i].mFrameNumber, EGL_NO_DISPLAY, EGL_NO_SYNC_KHR,
+                    Fence::NO_FENCE));
+        }
+        int32_t expectedReleaseCb = (enableReleasedCb ? releasedItems.size() : 0);
+        if (hasSurfaceListener) {
+            ASSERT_EQ(expectedReleaseCb, listener->getReleaseNotifyCount());
+        }
+
+        // Acquire 1 buffer, leaving 1+extraDiscardedBuffers filled buffer in queue
+        BufferItem item;
+        ASSERT_EQ(NO_ERROR, consumer->acquireBuffer(&item, 0));
+
+        // Discard free buffers
+        ASSERT_EQ(NO_ERROR, consumer->discardFreeBuffers());
+
+        if (hasSurfaceListener) {
+            ASSERT_EQ(expectedReleaseCb, listener->getReleaseNotifyCount());
+
+            // Check onBufferDiscarded is called with correct buffer
+            auto discardedBuffers = listener->getDiscardedBuffers();
+            ASSERT_EQ(discardedBuffers.size(), releasedItems.size());
+            for (int i = 0; i < releasedItems.size(); i++) {
+                ASSERT_EQ(discardedBuffers[i], releasedItems[i].mGraphicBuffer);
+            }
+
+            ASSERT_EQ(expectedReleaseCb, listener->getReleaseNotifyCount());
+        }
+
+        // Disconnect the surface
+        ASSERT_EQ(NO_ERROR, surface->disconnect(NATIVE_WINDOW_API_CPU));
+    }
+
     sp<Surface> mSurface;
     sp<SurfaceComposerClient> mComposerClient;
     sp<SurfaceControl> mSurfaceControl;
 };
+
+TEST_F(SurfaceTest, CreateSurfaceReturnsErrorBadClient) {
+    mComposerClient->dispose();
+    ASSERT_EQ(NO_INIT, mComposerClient->initCheck());
+
+    sp<SurfaceControl> sc;
+    status_t err = mComposerClient->createSurfaceChecked(
+            String8("Test Surface"), 32, 32, PIXEL_FORMAT_RGBA_8888, &sc, 0);
+    ASSERT_EQ(NO_INIT, err);
+}
 
 TEST_F(SurfaceTest, QueuesToWindowComposerIsTrueWhenVisible) {
     sp<ANativeWindow> anw(mSurface);
@@ -110,19 +237,20 @@ TEST_F(SurfaceTest, QueuesToWindowComposerIsTrueWhenPurgatorized) {
 }
 
 // This test probably doesn't belong here.
-TEST_F(SurfaceTest, ScreenshotsOfProtectedBuffersSucceed) {
+TEST_F(SurfaceTest, ScreenshotsOfProtectedBuffersDontSucceed) {
     sp<ANativeWindow> anw(mSurface);
 
     // Verify the screenshot works with no protected buffers.
-    sp<IGraphicBufferProducer> producer;
-    sp<IGraphicBufferConsumer> consumer;
-    BufferQueue::createBufferQueue(&producer, &consumer);
-    sp<CpuConsumer> cpuConsumer = new CpuConsumer(consumer, 1);
     sp<ISurfaceComposer> sf(ComposerService::getComposerService());
-    sp<IBinder> display(sf->getBuiltInDisplay(
-            ISurfaceComposer::eDisplayIdMain));
-    ASSERT_EQ(NO_ERROR, sf->captureScreen(display, producer, Rect(),
-            64, 64, 0, 0x7fffffff, false));
+
+    const sp<IBinder> display = sf->getInternalDisplayToken();
+    ASSERT_FALSE(display == nullptr);
+
+    sp<GraphicBuffer> outBuffer;
+    bool ignored;
+    ASSERT_EQ(NO_ERROR,
+              sf->captureScreen(display, &outBuffer, ignored, ui::Dataspace::V0_SRGB,
+                                ui::PixelFormat::RGBA_8888, Rect(), 64, 64, false));
 
     ASSERT_EQ(NO_ERROR, native_window_api_connect(anw.get(),
             NATIVE_WINDOW_API_CPU));
@@ -132,7 +260,7 @@ TEST_F(SurfaceTest, ScreenshotsOfProtectedBuffersSucceed) {
     ASSERT_EQ(NO_ERROR, native_window_set_usage(anw.get(),
             GRALLOC_USAGE_PROTECTED));
     ASSERT_EQ(NO_ERROR, native_window_set_buffer_count(anw.get(), 3));
-    ANativeWindowBuffer* buf = 0;
+    ANativeWindowBuffer* buf = nullptr;
 
     status_t err = native_window_dequeue_buffer_and_wait(anw.get(), &buf);
     if (err) {
@@ -152,8 +280,9 @@ TEST_F(SurfaceTest, ScreenshotsOfProtectedBuffersSucceed) {
                 &buf));
         ASSERT_EQ(NO_ERROR, anw->queueBuffer(anw.get(), buf, -1));
     }
-    ASSERT_EQ(NO_ERROR, sf->captureScreen(display, producer, Rect(),
-            64, 64, 0, 0x7fffffff, false));
+    ASSERT_EQ(NO_ERROR,
+              sf->captureScreen(display, &outBuffer, ignored, ui::Dataspace::V0_SRGB,
+                                ui::PixelFormat::RGBA_8888, Rect(), 64, 64, false));
 }
 
 TEST_F(SurfaceTest, ConcreteTypeIsSurface) {
@@ -192,7 +321,7 @@ TEST_F(SurfaceTest, QueryConsumerUsage) {
 }
 
 TEST_F(SurfaceTest, QueryDefaultBuffersDataSpace) {
-    const android_dataspace TEST_DATASPACE = HAL_DATASPACE_SRGB;
+    const android_dataspace TEST_DATASPACE = HAL_DATASPACE_V0_SRGB;
     sp<IGraphicBufferProducer> producer;
     sp<IGraphicBufferConsumer> consumer;
     BufferQueue::createBufferQueue(&producer, &consumer);
@@ -295,6 +424,75 @@ TEST_F(SurfaceTest, GetWideColorSupport) {
     ASSERT_EQ(hasWideColorDisplay, supported);
 }
 
+TEST_F(SurfaceTest, GetHdrSupport) {
+    sp<IGraphicBufferProducer> producer;
+    sp<IGraphicBufferConsumer> consumer;
+    BufferQueue::createBufferQueue(&producer, &consumer);
+
+    sp<DummyConsumer> dummyConsumer(new DummyConsumer);
+    consumer->consumerConnect(dummyConsumer, false);
+    consumer->setConsumerName(String8("TestConsumer"));
+
+    sp<Surface> surface = new Surface(producer);
+    sp<ANativeWindow> window(surface);
+    native_window_api_connect(window.get(), NATIVE_WINDOW_API_CPU);
+
+    bool supported;
+    status_t result = surface->getHdrSupport(&supported);
+    ASSERT_EQ(NO_ERROR, result);
+
+    // NOTE: This is not a CTS test.
+    // This test verifies that when the BoardConfig TARGET_HAS_HDR_DISPLAY
+    // is TRUE, getHdrSupport is also true.
+    // TODO: Add check for an HDR color mode on the primary display.
+    ASSERT_EQ(hasHdrDisplay, supported);
+}
+
+TEST_F(SurfaceTest, SetHdrMetadata) {
+    sp<IGraphicBufferProducer> producer;
+    sp<IGraphicBufferConsumer> consumer;
+    BufferQueue::createBufferQueue(&producer, &consumer);
+
+    sp<DummyConsumer> dummyConsumer(new DummyConsumer);
+    consumer->consumerConnect(dummyConsumer, false);
+    consumer->setConsumerName(String8("TestConsumer"));
+
+    sp<Surface> surface = new Surface(producer);
+    sp<ANativeWindow> window(surface);
+    native_window_api_connect(window.get(), NATIVE_WINDOW_API_CPU);
+
+    bool supported;
+    status_t result = surface->getHdrSupport(&supported);
+    ASSERT_EQ(NO_ERROR, result);
+
+    if (!hasHdrDisplay || !supported) {
+        return;
+    }
+    const android_smpte2086_metadata smpte2086 = {
+        {0.680, 0.320},
+        {0.265, 0.690},
+        {0.150, 0.060},
+        {0.3127, 0.3290},
+        100.0,
+        0.1,
+    };
+    const android_cta861_3_metadata cta861_3 = {
+        78.0,
+        62.0,
+    };
+
+    std::vector<uint8_t> hdr10plus;
+    hdr10plus.push_back(0xff);
+
+    int error = native_window_set_buffers_smpte2086_metadata(window.get(), &smpte2086);
+    ASSERT_EQ(error, NO_ERROR);
+    error = native_window_set_buffers_cta861_3_metadata(window.get(), &cta861_3);
+    ASSERT_EQ(error, NO_ERROR);
+    error = native_window_set_buffers_hdr10_plus_metadata(window.get(), hdr10plus.size(),
+                                                          hdr10plus.data());
+    ASSERT_EQ(error, NO_ERROR);
+}
+
 TEST_F(SurfaceTest, DynamicSetBufferCount) {
     sp<IGraphicBufferProducer> producer;
     sp<IGraphicBufferConsumer> consumer;
@@ -393,6 +591,21 @@ TEST_F(SurfaceTest, GetAndFlushRemovedBuffers) {
     ASSERT_LE(removedBuffers.size(), 1u);
 }
 
+TEST_F(SurfaceTest, SurfaceListenerTest) {
+    // Test discarding 1 free buffers with no listener
+    testSurfaceListener(/*hasListener*/false, /*enableReleaseCb*/false, /*extraDiscardedBuffers*/0);
+    // Test discarding 2 free buffers with no listener
+    testSurfaceListener(/*hasListener*/false, /*enableReleaseCb*/false, /*extraDiscardedBuffers*/1);
+    // Test discarding 1 free buffers with a listener, disabling onBufferReleased
+    testSurfaceListener(/*hasListener*/true, /*enableReleasedCb*/false, /*extraDiscardedBuffers*/0);
+    // Test discarding 2 free buffers with a listener, disabling onBufferReleased
+    testSurfaceListener(/*hasListener*/true, /*enableReleasedCb*/false, /*extraDiscardedBuffers*/1);
+    // Test discarding 1 free buffers with a listener, enabling onBufferReleased
+    testSurfaceListener(/*hasListener*/true, /*enableReleasedCb*/true, /*extraDiscardedBuffers*/0);
+    // Test discarding 3 free buffers with a listener, enabling onBufferReleased
+    testSurfaceListener(/*hasListener*/true, /*enableReleasedCb*/true, /*extraDiscardedBuffers*/2);
+}
+
 TEST_F(SurfaceTest, TestGetLastDequeueStartTime) {
     sp<ANativeWindow> anw(mSurface);
     ASSERT_EQ(NO_ERROR, native_window_api_connect(anw.get(), NATIVE_WINDOW_API_CPU));
@@ -461,21 +674,23 @@ public:
     }
 
     sp<ISurfaceComposerClient> createConnection() override { return nullptr; }
-    sp<ISurfaceComposerClient> createScopedConnection(
-            const sp<IGraphicBufferProducer>& /* parent */) override {
-        return nullptr;
-    }
-    sp<IDisplayEventConnection> createDisplayEventConnection(ISurfaceComposer::VsyncSource)
-            override {
+    sp<IDisplayEventConnection> createDisplayEventConnection(
+            ISurfaceComposer::VsyncSource, ISurfaceComposer::ConfigChanged) override {
         return nullptr;
     }
     sp<IBinder> createDisplay(const String8& /*displayName*/,
             bool /*secure*/) override { return nullptr; }
     void destroyDisplay(const sp<IBinder>& /*display */) override {}
-    sp<IBinder> getBuiltInDisplay(int32_t /*id*/) override { return nullptr; }
+    std::vector<PhysicalDisplayId> getPhysicalDisplayIds() const override { return {}; }
+    sp<IBinder> getPhysicalDisplayToken(PhysicalDisplayId) const override { return nullptr; }
     void setTransactionState(const Vector<ComposerState>& /*state*/,
-            const Vector<DisplayState>& /*displays*/, uint32_t /*flags*/)
-            override {}
+                             const Vector<DisplayState>& /*displays*/, uint32_t /*flags*/,
+                             const sp<IBinder>& /*applyToken*/,
+                             const InputWindowCommands& /*inputWindowCommands*/,
+                             int64_t /*desiredPresentTime*/, const client_cache_t& /*cachedBuffer*/,
+                             const std::vector<ListenerCallbacks>& /*listenerCallbacks*/) override {
+    }
+
     void bootFinished() override {}
     bool authenticateSurfaceTexture(
             const sp<IGraphicBufferProducer>& /*surface*/) const override {
@@ -512,21 +727,41 @@ public:
         return NO_ERROR;
     }
     status_t getDisplayColorModes(const sp<IBinder>& /*display*/,
-            Vector<android_color_mode_t>* /*outColorModes*/) override {
+            Vector<ColorMode>* /*outColorModes*/) override {
         return NO_ERROR;
     }
-    android_color_mode_t getActiveColorMode(const sp<IBinder>& /*display*/)
+    status_t getDisplayNativePrimaries(const sp<IBinder>& /*display*/,
+            ui::DisplayPrimaries& /*primaries*/) override {
+        return NO_ERROR;
+    }
+    ColorMode getActiveColorMode(const sp<IBinder>& /*display*/)
             override {
-        return HAL_COLOR_MODE_NATIVE;
+        return ColorMode::NATIVE;
     }
     status_t setActiveColorMode(const sp<IBinder>& /*display*/,
-            android_color_mode_t /*colorMode*/) override { return NO_ERROR; }
-    status_t captureScreen(const sp<IBinder>& /*display*/,
-            const sp<IGraphicBufferProducer>& /*producer*/,
-            Rect /*sourceCrop*/, uint32_t /*reqWidth*/, uint32_t /*reqHeight*/,
-            int32_t /*minLayerZ*/, int32_t /*maxLayerZ*/,
-            bool /*useIdentityTransform*/,
-            Rotation /*rotation*/) override { return NO_ERROR; }
+        ColorMode /*colorMode*/) override { return NO_ERROR; }
+    status_t captureScreen(const sp<IBinder>& /*display*/, sp<GraphicBuffer>* /*outBuffer*/,
+                           bool& /* outCapturedSecureLayers */,
+                           const ui::Dataspace /*reqDataspace*/,
+                           const ui::PixelFormat /*reqPixelFormat*/, Rect /*sourceCrop*/,
+                           uint32_t /*reqWidth*/, uint32_t /*reqHeight*/,
+                           bool /*useIdentityTransform*/, Rotation /*rotation*/,
+                           bool /*captureSecureLayers*/) override {
+        return NO_ERROR;
+    }
+    status_t captureScreen(uint64_t /*displayOrLayerStack*/, ui::Dataspace* /*outDataspace*/,
+                           sp<GraphicBuffer>* /*outBuffer*/) override {
+        return NO_ERROR;
+    }
+    virtual status_t captureLayers(
+            const sp<IBinder>& /*parentHandle*/, sp<GraphicBuffer>* /*outBuffer*/,
+            const ui::Dataspace /*reqDataspace*/, const ui::PixelFormat /*reqPixelFormat*/,
+            const Rect& /*sourceCrop*/,
+            const std::unordered_set<sp<IBinder>,
+                                     ISurfaceComposer::SpHash<IBinder>>& /*excludeHandles*/,
+            float /*frameScale*/, bool /*childrenOnly*/) override {
+        return NO_ERROR;
+    }
     status_t clearAnimationFrameStats() override { return NO_ERROR; }
     status_t getAnimationFrameStats(FrameStats* /*outStats*/) const override {
         return NO_ERROR;
@@ -539,6 +774,63 @@ public:
         return NO_ERROR;
     }
     status_t injectVSync(nsecs_t /*when*/) override { return NO_ERROR; }
+    status_t getLayerDebugInfo(std::vector<LayerDebugInfo>* /*layers*/) const override {
+        return NO_ERROR;
+    }
+    status_t getCompositionPreference(
+            ui::Dataspace* /*outDefaultDataspace*/, ui::PixelFormat* /*outDefaultPixelFormat*/,
+            ui::Dataspace* /*outWideColorGamutDataspace*/,
+            ui::PixelFormat* /*outWideColorGamutPixelFormat*/) const override {
+        return NO_ERROR;
+    }
+    status_t getDisplayedContentSamplingAttributes(const sp<IBinder>& /*display*/,
+                                                   ui::PixelFormat* /*outFormat*/,
+                                                   ui::Dataspace* /*outDataspace*/,
+                                                   uint8_t* /*outComponentMask*/) const override {
+        return NO_ERROR;
+    }
+    status_t setDisplayContentSamplingEnabled(const sp<IBinder>& /*display*/, bool /*enable*/,
+                                              uint8_t /*componentMask*/,
+                                              uint64_t /*maxFrames*/) const override {
+        return NO_ERROR;
+    }
+    status_t getDisplayedContentSample(const sp<IBinder>& /*display*/, uint64_t /*maxFrames*/,
+                                       uint64_t /*timestamp*/,
+                                       DisplayedFrameStats* /*outStats*/) const override {
+        return NO_ERROR;
+    }
+
+    status_t getColorManagement(bool* /*outGetColorManagement*/) const override { return NO_ERROR; }
+    status_t getProtectedContentSupport(bool* /*outSupported*/) const override { return NO_ERROR; }
+
+    status_t isWideColorDisplay(const sp<IBinder>&, bool*) const override { return NO_ERROR; }
+    status_t getDisplayBrightnessSupport(const sp<IBinder>& /*displayToken*/,
+                                         bool* /*outSupport*/) const override {
+        return NO_ERROR;
+    }
+    status_t setDisplayBrightness(const sp<IBinder>& /*displayToken*/,
+                                  float /*brightness*/) const override {
+        return NO_ERROR;
+    }
+
+    status_t addRegionSamplingListener(const Rect& /*samplingArea*/,
+                                       const sp<IBinder>& /*stopLayerHandle*/,
+                                       const sp<IRegionSamplingListener>& /*listener*/) override {
+        return NO_ERROR;
+    }
+    status_t removeRegionSamplingListener(
+            const sp<IRegionSamplingListener>& /*listener*/) override {
+        return NO_ERROR;
+    }
+    status_t setAllowedDisplayConfigs(const sp<IBinder>& /*displayToken*/,
+                                      const std::vector<int32_t>& /*allowedConfigs*/) override {
+        return NO_ERROR;
+    }
+    status_t getAllowedDisplayConfigs(const sp<IBinder>& /*displayToken*/,
+                                      std::vector<int32_t>* /*outAllowedConfigs*/) override {
+        return NO_ERROR;
+    }
+    status_t notifyPowerHint(int32_t /*hintId*/) override { return NO_ERROR; }
 
 protected:
     IBinder* onAsBinder() override { return nullptr; }
@@ -549,8 +841,7 @@ private:
 
 class FakeProducerFrameEventHistory : public ProducerFrameEventHistory {
 public:
-    FakeProducerFrameEventHistory(FenceToFenceTimeMap* fenceMap)
-        : mFenceMap(fenceMap) {}
+    explicit FakeProducerFrameEventHistory(FenceToFenceTimeMap* fenceMap) : mFenceMap(fenceMap) {}
 
     ~FakeProducerFrameEventHistory() {}
 
@@ -797,7 +1088,7 @@ protected:
                 (iOldFrame == NO_FRAME_INDEX) ? nullptr : &mFrames[iOldFrame];
         FrameEvents* newFrame = &mFrames[iNewFrame];
 
-        uint64_t nOldFrame = iOldFrame + 1;
+        uint64_t nOldFrame = (iOldFrame == NO_FRAME_INDEX) ? 0 : iOldFrame + 1;
         uint64_t nNewFrame = iNewFrame + 1;
 
         // Latch, Composite, and Release the frames in a plausible order.
@@ -1075,7 +1366,6 @@ TEST_F(GetFrameTimestampsTest, CompositorTimingUpdatesBasic) {
     EXPECT_EQ(initialCompositorTiming.presentLatency,
               compositeToPresentLatency);
 
-    const uint64_t fId1 = getNextFrameId();
     dequeueAndQueue(0);
     addFrameEvents(true, NO_FRAME_INDEX, 0);
 
@@ -1089,7 +1379,6 @@ TEST_F(GetFrameTimestampsTest, CompositorTimingUpdatesBasic) {
     EXPECT_EQ(initialCompositorTiming.presentLatency,
               compositeToPresentLatency);
 
-    const uint64_t fId2 = getNextFrameId();
     dequeueAndQueue(1);
     addFrameEvents(true, 0, 1);
 
@@ -1162,7 +1451,6 @@ TEST_F(GetFrameTimestampsTest, CompositorTimingDeadlineSnaps) {
     nsecs_t expectedDeadline = initialCompositorTiming.deadline;
     EXPECT_EQ(expectedDeadline, compositeDeadline);
 
-    const uint64_t fId1 = getNextFrameId();
     dequeueAndQueue(0);
     addFrameEvents(true, NO_FRAME_INDEX, 0);
 
@@ -1175,7 +1463,6 @@ TEST_F(GetFrameTimestampsTest, CompositorTimingDeadlineSnaps) {
             initialCompositorTiming.deadline +initialCompositorTiming.interval;
     EXPECT_EQ(expectedDeadline, compositeDeadline);
 
-    const uint64_t fId2 = getNextFrameId();
     dequeueAndQueue(1);
     addFrameEvents(true, 0, 1);
 

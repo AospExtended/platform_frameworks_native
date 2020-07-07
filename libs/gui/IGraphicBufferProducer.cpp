@@ -27,16 +27,24 @@
 #include <binder/Parcel.h>
 #include <binder/IInterface.h>
 
+#ifndef NO_BUFFERHUB
+#include <gui/BufferHubProducer.h>
+#endif
+
+#include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
+#include <gui/bufferqueue/2.0/H2BGraphicBufferProducer.h>
 #include <gui/BufferQueueDefs.h>
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/IProducerListener.h>
 
-#include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
-
 namespace android {
 // ----------------------------------------------------------------------------
 
-using ::android::hardware::graphics::bufferqueue::V1_0::utils::
+using H2BGraphicBufferProducerV1_0 =
+        ::android::hardware::graphics::bufferqueue::V1_0::utils::
+        H2BGraphicBufferProducer;
+using H2BGraphicBufferProducerV2_0 =
+        ::android::hardware::graphics::bufferqueue::V2_0::utils::
         H2BGraphicBufferProducer;
 
 enum {
@@ -62,7 +70,9 @@ enum {
     SET_DEQUEUE_TIMEOUT,
     GET_LAST_QUEUED_BUFFER,
     GET_FRAME_TIMESTAMPS,
-    GET_UNIQUE_ID
+    GET_UNIQUE_ID,
+    GET_CONSUMER_USAGE,
+    SET_LEGACY_BUFFER_DROP,
 };
 
 class BpGraphicBufferProducer : public BpInterface<IGraphicBufferProducer>
@@ -73,7 +83,7 @@ public:
     {
     }
 
-    virtual ~BpGraphicBufferProducer();
+    ~BpGraphicBufferProducer() override;
 
     virtual status_t requestBuffer(int bufferIdx, sp<GraphicBuffer>* buf) {
         Parcel data, reply;
@@ -124,9 +134,9 @@ public:
         return result;
     }
 
-    virtual status_t dequeueBuffer(int *buf, sp<Fence>* fence, uint32_t width,
-            uint32_t height, PixelFormat format, uint32_t usage,
-            FrameEventHistoryDelta* outTimestamps) {
+    virtual status_t dequeueBuffer(int* buf, sp<Fence>* fence, uint32_t width, uint32_t height,
+                                   PixelFormat format, uint64_t usage, uint64_t* outBufferAge,
+                                   FrameEventHistoryDelta* outTimestamps) {
         Parcel data, reply;
         bool getFrameTimestamps = (outTimestamps != nullptr);
 
@@ -134,7 +144,7 @@ public:
         data.writeUint32(width);
         data.writeUint32(height);
         data.writeInt32(static_cast<int32_t>(format));
-        data.writeUint32(usage);
+        data.writeUint64(usage);
         data.writeBool(getFrameTimestamps);
 
         status_t result = remote()->transact(DEQUEUE_BUFFER, data, &reply);
@@ -147,6 +157,17 @@ public:
         result = reply.read(**fence);
         if (result != NO_ERROR) {
             fence->clear();
+            return result;
+        }
+        if (outBufferAge) {
+            result = reply.readUint64(outBufferAge);
+        } else {
+            // Read the value even if outBufferAge is nullptr:
+            uint64_t bufferAge;
+            result = reply.readUint64(&bufferAge);
+        }
+        if (result != NO_ERROR) {
+            ALOGE("IGBP::dequeueBuffer failed to read buffer age: %d", result);
             return result;
         }
         if (getFrameTimestamps) {
@@ -175,10 +196,10 @@ public:
 
     virtual status_t detachNextBuffer(sp<GraphicBuffer>* outBuffer,
             sp<Fence>* outFence) {
-        if (outBuffer == NULL) {
+        if (outBuffer == nullptr) {
             ALOGE("detachNextBuffer: outBuffer must not be NULL");
             return BAD_VALUE;
-        } else if (outFence == NULL) {
+        } else if (outFence == nullptr) {
             ALOGE("detachNextBuffer: outFence must not be NULL");
             return BAD_VALUE;
         }
@@ -286,7 +307,7 @@ public:
             int api, bool producerControlledByApp, QueueBufferOutput* output) {
         Parcel data, reply;
         data.writeInterfaceToken(IGraphicBufferProducer::getInterfaceDescriptor());
-        if (listener != NULL) {
+        if (listener != nullptr) {
             data.writeInt32(1);
             data.writeStrongBinder(IInterface::asBinder(listener));
         } else {
@@ -333,14 +354,14 @@ public:
     }
 
     virtual void allocateBuffers(uint32_t width, uint32_t height,
-            PixelFormat format, uint32_t usage) {
+            PixelFormat format, uint64_t usage) {
         Parcel data, reply;
         data.writeInterfaceToken(IGraphicBufferProducer::getInterfaceDescriptor());
         data.writeUint32(width);
         data.writeUint32(height);
         data.writeInt32(static_cast<int32_t>(format));
-        data.writeUint32(usage);
-        status_t result = remote()->transact(ALLOCATE_BUFFERS, data, &reply);
+        data.writeUint64(usage);
+        status_t result = remote()->transact(ALLOCATE_BUFFERS, data, &reply, IBinder::FLAG_ONEWAY);
         if (result != NO_ERROR) {
             ALOGE("allocateBuffers failed to transact: %d", result);
         }
@@ -415,6 +436,20 @@ public:
             return result;
         }
         return reply.readInt32();
+    }
+
+    virtual status_t setLegacyBufferDrop(bool drop) {
+        Parcel data, reply;
+        data.writeInterfaceToken(
+                IGraphicBufferProducer::getInterfaceDescriptor());
+        data.writeInt32(drop);
+        status_t result = remote()->transact(SET_LEGACY_BUFFER_DROP,
+                data, &reply);
+        if (result != NO_ERROR) {
+            return result;
+        }
+        result = reply.readInt32();
+        return result;
     }
 
     virtual status_t getLastQueuedBuffer(sp<GraphicBuffer>* outBuffer,
@@ -493,6 +528,25 @@ public:
         }
         return actualResult;
     }
+
+    virtual status_t getConsumerUsage(uint64_t* outUsage) const {
+        Parcel data, reply;
+        data.writeInterfaceToken(IGraphicBufferProducer::getInterfaceDescriptor());
+        status_t result = remote()->transact(GET_CONSUMER_USAGE, data, &reply);
+        if (result != NO_ERROR) {
+            ALOGE("getConsumerUsage failed to transact: %d", result);
+        }
+        status_t actualResult = NO_ERROR;
+        result = reply.readInt32(&actualResult);
+        if (result != NO_ERROR) {
+            return result;
+        }
+        result = reply.readUint64(outUsage);
+        if (result != NO_ERROR) {
+            return result;
+        }
+        return actualResult;
+    }
 };
 
 // Out-of-line virtual method definition to trigger vtable emission in this
@@ -500,9 +554,11 @@ public:
 BpGraphicBufferProducer::~BpGraphicBufferProducer() {}
 
 class HpGraphicBufferProducer : public HpInterface<
-        BpGraphicBufferProducer, H2BGraphicBufferProducer> {
+        BpGraphicBufferProducer,
+        H2BGraphicBufferProducerV1_0,
+        H2BGraphicBufferProducerV2_0> {
 public:
-    HpGraphicBufferProducer(const sp<IBinder>& base) : PBase(base) {}
+    explicit HpGraphicBufferProducer(const sp<IBinder>& base) : PBase(base) {}
 
     status_t requestBuffer(int slot, sp<GraphicBuffer>* buf) override {
         return mBase->requestBuffer(slot, buf);
@@ -516,11 +572,10 @@ public:
         return mBase->setAsyncMode(async);
     }
 
-    status_t dequeueBuffer(int* slot, sp<Fence>* fence, uint32_t w, uint32_t h,
-            PixelFormat format, uint32_t usage,
-            FrameEventHistoryDelta* outTimestamps) override {
-        return mBase->dequeueBuffer(
-                slot, fence, w, h, format, usage, outTimestamps);
+    status_t dequeueBuffer(int* slot, sp<Fence>* fence, uint32_t w, uint32_t h, PixelFormat format,
+                           uint64_t usage, uint64_t* outBufferAge,
+                           FrameEventHistoryDelta* outTimestamps) override {
+        return mBase->dequeueBuffer(slot, fence, w, h, format, usage, outBufferAge, outTimestamps);
     }
 
     status_t detachBuffer(int slot) override {
@@ -569,7 +624,7 @@ public:
     }
 
     void allocateBuffers(uint32_t width, uint32_t height,
-            PixelFormat format, uint32_t usage) override {
+            PixelFormat format, uint64_t usage) override {
         return mBase->allocateBuffers(width, height, format, usage);
     }
 
@@ -597,6 +652,10 @@ public:
         return mBase->setDequeueTimeout(timeout);
     }
 
+    status_t setLegacyBufferDrop(bool drop) override {
+        return mBase->setLegacyBufferDrop(drop);
+    }
+
     status_t getLastQueuedBuffer(
             sp<GraphicBuffer>* outBuffer,
             sp<Fence>* outFence,
@@ -612,12 +671,95 @@ public:
     status_t getUniqueId(uint64_t* outId) const override {
         return mBase->getUniqueId(outId);
     }
+
+    status_t getConsumerUsage(uint64_t* outUsage) const override {
+        return mBase->getConsumerUsage(outUsage);
+    }
 };
 
-IMPLEMENT_HYBRID_META_INTERFACE(GraphicBufferProducer, HGraphicBufferProducer,
+IMPLEMENT_HYBRID_META_INTERFACE(GraphicBufferProducer,
         "android.gui.IGraphicBufferProducer");
 
 // ----------------------------------------------------------------------
+
+status_t IGraphicBufferProducer::setLegacyBufferDrop(bool drop) {
+    // No-op for IGBP other than BufferQueue.
+    (void) drop;
+    return INVALID_OPERATION;
+}
+
+status_t IGraphicBufferProducer::exportToParcel(Parcel* parcel) {
+    status_t res = OK;
+    res = parcel->writeUint32(USE_BUFFER_QUEUE);
+    if (res != NO_ERROR) {
+        ALOGE("exportToParcel: Cannot write magic, res=%d.", res);
+        return res;
+    }
+
+    return parcel->writeStrongBinder(IInterface::asBinder(this));
+}
+
+/* static */
+status_t IGraphicBufferProducer::exportToParcel(const sp<IGraphicBufferProducer>& producer,
+                                                Parcel* parcel) {
+    if (parcel == nullptr) {
+        ALOGE("exportToParcel: Invalid parcel object.");
+        return BAD_VALUE;
+    }
+
+    if (producer == nullptr) {
+        status_t res = OK;
+        res = parcel->writeUint32(IGraphicBufferProducer::USE_BUFFER_QUEUE);
+        if (res != NO_ERROR) return res;
+        return parcel->writeStrongBinder(nullptr);
+    } else {
+        return producer->exportToParcel(parcel);
+    }
+}
+
+/* static */
+sp<IGraphicBufferProducer> IGraphicBufferProducer::createFromParcel(const Parcel* parcel) {
+    uint32_t outMagic = 0;
+    status_t res = NO_ERROR;
+
+    res = parcel->readUint32(&outMagic);
+    if (res != NO_ERROR) {
+        ALOGE("createFromParcel: Failed to read magic, error=%d.", res);
+        return nullptr;
+    }
+
+    switch (outMagic) {
+        case USE_BUFFER_QUEUE: {
+            sp<IBinder> binder;
+            res = parcel->readNullableStrongBinder(&binder);
+            if (res != NO_ERROR) {
+                ALOGE("createFromParcel: Can't read strong binder.");
+                return nullptr;
+            }
+            return interface_cast<IGraphicBufferProducer>(binder);
+        }
+        case USE_BUFFER_HUB: {
+            ALOGE("createFromParcel: BufferHub not implemented.");
+#ifndef NO_BUFFERHUB
+            dvr::ProducerQueueParcelable producerParcelable;
+            res = producerParcelable.readFromParcel(parcel);
+            if (res != NO_ERROR) {
+                ALOGE("createFromParcel: Failed to read from parcel, error=%d", res);
+                return nullptr;
+            }
+            return BufferHubProducer::Create(std::move(producerParcelable));
+#else
+            return nullptr;
+#endif
+        }
+        default: {
+            ALOGE("createFromParcel: Unexpected mgaic: 0x%x.", outMagic);
+            return nullptr;
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 
 status_t BnGraphicBufferProducer::onTransact(
     uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
@@ -628,8 +770,8 @@ status_t BnGraphicBufferProducer::onTransact(
             int bufferIdx   = data.readInt32();
             sp<GraphicBuffer> buffer;
             int result = requestBuffer(bufferIdx, &buffer);
-            reply->writeInt32(buffer != 0);
-            if (buffer != 0) {
+            reply->writeInt32(buffer != nullptr);
+            if (buffer != nullptr) {
                 reply->write(*buffer);
             }
             reply->writeInt32(result);
@@ -654,17 +796,23 @@ status_t BnGraphicBufferProducer::onTransact(
             uint32_t width = data.readUint32();
             uint32_t height = data.readUint32();
             PixelFormat format = static_cast<PixelFormat>(data.readInt32());
-            uint32_t usage = data.readUint32();
+            uint64_t usage = data.readUint64();
+            uint64_t bufferAge = 0;
             bool getTimestamps = data.readBool();
 
             int buf = 0;
             sp<Fence> fence = Fence::NO_FENCE;
             FrameEventHistoryDelta frameTimestamps;
-            int result = dequeueBuffer(&buf, &fence, width, height, format,
-                    usage, getTimestamps ? &frameTimestamps : nullptr);
+            int result = dequeueBuffer(&buf, &fence, width, height, format, usage, &bufferAge,
+                                       getTimestamps ? &frameTimestamps : nullptr);
 
+            if (fence == nullptr) {
+                ALOGE("dequeueBuffer returned a NULL fence, setting to Fence::NO_FENCE");
+                fence = Fence::NO_FENCE;
+            }
             reply->writeInt32(buf);
             reply->write(*fence);
+            reply->writeUint64(bufferAge);
             if (getTimestamps) {
                 reply->write(frameTimestamps);
             }
@@ -685,12 +833,12 @@ status_t BnGraphicBufferProducer::onTransact(
             int32_t result = detachNextBuffer(&buffer, &fence);
             reply->writeInt32(result);
             if (result == NO_ERROR) {
-                reply->writeInt32(buffer != NULL);
-                if (buffer != NULL) {
+                reply->writeInt32(buffer != nullptr);
+                if (buffer != nullptr) {
                     reply->write(*buffer);
                 }
-                reply->writeInt32(fence != NULL);
-                if (fence != NULL) {
+                reply->writeInt32(fence != nullptr);
+                if (fence != nullptr) {
                     reply->write(*fence);
                 }
             }
@@ -777,7 +925,7 @@ status_t BnGraphicBufferProducer::onTransact(
             uint32_t width = data.readUint32();
             uint32_t height = data.readUint32();
             PixelFormat format = static_cast<PixelFormat>(data.readInt32());
-            uint32_t usage = data.readUint32();
+            uint64_t usage = data.readUint64();
             allocateBuffers(width, height, format, usage);
             return NO_ERROR;
         }
@@ -844,6 +992,10 @@ status_t BnGraphicBufferProducer::onTransact(
                 ALOGE("getLastQueuedBuffer failed to write buffer: %d", result);
                 return result;
             }
+            if (fence == nullptr) {
+                ALOGE("getLastQueuedBuffer returned a NULL fence, setting to Fence::NO_FENCE");
+                fence = Fence::NO_FENCE;
+            }
             result = reply->write(*fence);
             if (result != NO_ERROR) {
                 ALOGE("getLastQueuedBuffer failed to write fence: %d", result);
@@ -877,6 +1029,27 @@ status_t BnGraphicBufferProducer::onTransact(
             }
             return NO_ERROR;
         }
+        case GET_CONSUMER_USAGE: {
+            CHECK_INTERFACE(IGraphicBufferProducer, data, reply);
+            uint64_t outUsage = 0;
+            status_t actualResult = getConsumerUsage(&outUsage);
+            status_t result = reply->writeInt32(actualResult);
+            if (result != NO_ERROR) {
+                return result;
+            }
+            result = reply->writeUint64(outUsage);
+            if (result != NO_ERROR) {
+                return result;
+            }
+            return NO_ERROR;
+        }
+        case SET_LEGACY_BUFFER_DROP: {
+            CHECK_INTERFACE(IGraphicBufferProducer, data, reply);
+            bool drop = data.readInt32();
+            int result = setLegacyBufferDrop(drop);
+            reply->writeInt32(result);
+            return NO_ERROR;
+        }
     }
     return BBinder::onTransact(code, data, reply, flags);
 }
@@ -901,7 +1074,8 @@ constexpr size_t IGraphicBufferProducer::QueueBufferInput::minFlattenedSize() {
 size_t IGraphicBufferProducer::QueueBufferInput::getFlattenedSize() const {
     return minFlattenedSize() +
             fence->getFlattenedSize() +
-            surfaceDamage.getFlattenedSize();
+            surfaceDamage.getFlattenedSize() +
+            hdrMetadata.getFlattenedSize();
 }
 
 size_t IGraphicBufferProducer::QueueBufferInput::getFdCount() const {
@@ -928,7 +1102,12 @@ status_t IGraphicBufferProducer::QueueBufferInput::flatten(
     if (result != NO_ERROR) {
         return result;
     }
-    return surfaceDamage.flatten(buffer, size);
+    result = surfaceDamage.flatten(buffer, size);
+    if (result != NO_ERROR) {
+        return result;
+    }
+    FlattenableUtils::advance(buffer, size, surfaceDamage.getFlattenedSize());
+    return hdrMetadata.flatten(buffer, size);
 }
 
 status_t IGraphicBufferProducer::QueueBufferInput::unflatten(
@@ -952,7 +1131,12 @@ status_t IGraphicBufferProducer::QueueBufferInput::unflatten(
     if (result != NO_ERROR) {
         return result;
     }
-    return surfaceDamage.unflatten(buffer, size);
+    result = surfaceDamage.unflatten(buffer, size);
+    if (result != NO_ERROR) {
+        return result;
+    }
+    FlattenableUtils::advance(buffer, size, surfaceDamage.getFlattenedSize());
+    return hdrMetadata.unflatten(buffer, size);
 }
 
 // ----------------------------------------------------------------------------

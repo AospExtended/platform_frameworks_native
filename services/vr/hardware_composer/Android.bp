@@ -7,18 +7,18 @@ cc_library_shared {
   ],
 
   static_libs: [
-    "libhwcomposer-client",
+    "libbroadcastring",
     "libdisplay",
-    "libbufferhubqueue",
-    "libbufferhub",
-    "libpdx_default_transport",
   ],
 
   shared_libs: [
     "android.frameworks.vr.composer@1.0",
     "android.hardware.graphics.composer@2.1",
     "android.hardware.graphics.mapper@2.0",
+    "android.hardware.graphics.mapper@3.0",
     "libbase",
+    "libbufferhubqueue",
+    "libbinder",
     "libcutils",
     "libfmq",
     "libhardware",
@@ -28,10 +28,20 @@ cc_library_shared {
     "libsync",
     "libui",
     "libutils",
+    "libpdx_default_transport",
+  ],
+
+  header_libs: [
+    "android.hardware.graphics.composer@2.1-command-buffer",
+    "android.hardware.graphics.composer@2.1-hal",
+  ],
+
+  export_header_lib_headers: [
+    "android.hardware.graphics.composer@2.1-hal",
   ],
 
   export_static_lib_headers: [
-    "libhwcomposer-client",
+    "libdisplay",
   ],
 
   export_shared_lib_headers: [
@@ -43,6 +53,13 @@ cc_library_shared {
 
   cflags: [
     "-DLOG_TAG=\"vr_hwc\"",
+    "-DATRACE_TAG=ATRACE_TAG_GRAPHICS",
+    "-Wall",
+    "-Werror",
+    "-Wno-error=unused-private-field",
+    // Warnings in vr_hwc.cpp to be fixed after sync of goog/master.
+    "-Wno-sign-compare",
+    "-Wno-unused-parameter",
   ],
 
 }
@@ -61,6 +78,11 @@ cc_library_static {
     export_aidl_headers: true,
   },
   export_include_dirs: ["aidl"],
+
+  cflags: [
+    "-Wall",
+    "-Werror",
+  ],
 
   shared_libs: [
     "libbinder",
@@ -91,11 +113,14 @@ cc_library_static {
   ],
   cflags: [
     "-DLOG_TAG=\"vr_hwc\"",
+    "-Wall",
+    "-Werror",
   ],
 }
 
 cc_binary {
   name: "vr_hwc",
+  vintf_fragments: ["manifest_vr_hwc.xml"],
   srcs: [
     "vr_hardware_composer_service.cpp"
   ],
@@ -112,13 +137,15 @@ cc_binary {
     "libbinder",
     "liblog",
     "libhardware",
-    "libhwbinder",
+    "libhidlbase",
     "libui",
     "libutils",
     "libvr_hwc-hal",
   ],
   cflags: [
     "-DLOG_TAG=\"vr_hwc\"",
+    "-Wall",
+    "-Werror",
   ],
   init_rc: [
     "vr_hwc.rc",
@@ -135,6 +162,13 @@ cc_test {
     // NOTE: This needs to be included after the *-impl lib otherwise the
     // symbols in the *-binder library get optimized out.
     "libvr_hwc-binder",
+  ],
+  cflags: [
+    "-Wall",
+    "-Werror",
+    // warnings in vr_composer_test.cpp to be fixed after merge of goog/master
+    "-Wno-sign-compare",
+    "-Wno-unused-parameter",
   ],
   shared_libs: [
     "libbase",

@@ -43,6 +43,7 @@ type u64 size_t
 
 // VK_USE_PLATFORM_ANDROID_KHR
 @internal class ANativeWindow {}
+@internal class AHardwareBuffer {}
 @internal type void* buffer_handle_t
 
 // VK_USE_PLATFORM_WIN32_KHR
@@ -55,3 +56,6 @@ type u64 size_t
 
 // VK_USE_PLATFORM_XLIB_XRANDR_EXT
 @internal type u64 RROutput
+
+// VK_USE_PLATFORM_FUCHSIA
+@internal type u32 zx_handle_t

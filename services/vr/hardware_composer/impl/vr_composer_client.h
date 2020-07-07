@@ -18,51 +18,53 @@
 #define ANDROID_DVR_HARDWARE_COMPOSER_IMPL_VR_COMPOSER_CLIENT_H
 
 #include <android/frameworks/vr/composer/1.0/IVrComposerClient.h>
-#include <ComposerClient.h>
-#include <IComposerCommandBuffer.h>
+#include <composer-command-buffer/2.1/ComposerCommandBuffer.h>
+#include <composer-hal/2.1/ComposerClient.h>
+#include <composer-hal/2.1/ComposerCommandEngine.h>
 
 namespace android {
 namespace dvr {
 
 class VrHwc;
 
-using hardware::graphics::common::V1_0::PixelFormat;
-using hardware::graphics::composer::V2_1::implementation::ComposerClient;
+using hardware::graphics::composer::V2_1::hal::ComposerCommandEngine;
+using hardware::graphics::composer::V2_1::hal::ComposerHal;
+using hardware::graphics::composer::V2_1::hal::detail::ComposerClientImpl;
+
+using ComposerClient = ComposerClientImpl<IVrComposerClient, ComposerHal>;
 
 class VrComposerClient : public ComposerClient {
  public:
-  VrComposerClient(android::dvr::VrHwc& hal);
+  explicit VrComposerClient(android::dvr::VrHwc& hal);
   virtual ~VrComposerClient();
 
  private:
-  class VrCommandReader : public ComposerClient::CommandReader {
+  class VrCommandEngine : public ComposerCommandEngine {
    public:
-    VrCommandReader(VrComposerClient& client);
-    ~VrCommandReader() override;
+    explicit VrCommandEngine(VrComposerClient& client);
+    ~VrCommandEngine() override;
 
-    bool parseCommand(IComposerClient::Command command,
-                      uint16_t length) override;
+    bool executeCommand(IComposerClient::Command command,
+                        uint16_t length) override;
 
    private:
-    bool parseSetLayerInfo(uint16_t length);
-    bool parseSetClientTargetMetadata(uint16_t length);
-    bool parseSetLayerBufferMetadata(uint16_t length);
+    bool executeSetLayerInfo(uint16_t length);
+    bool executeSetClientTargetMetadata(uint16_t length);
+    bool executeSetLayerBufferMetadata(uint16_t length);
 
     IVrComposerClient::BufferMetadata readBufferMetadata();
 
-    VrComposerClient& mVrClient;
     android::dvr::VrHwc& mVrHal;
 
-    VrCommandReader(const VrCommandReader&) = delete;
-    void operator=(const VrCommandReader&) = delete;
+    VrCommandEngine(const VrCommandEngine&) = delete;
+    void operator=(const VrCommandEngine&) = delete;
   };
-
-  std::unique_ptr<CommandReader> createCommandReader() override;
-
-  dvr::VrHwc& mVrHal;
 
   VrComposerClient(const VrComposerClient&) = delete;
   void operator=(const VrComposerClient&) = delete;
+
+  std::unique_ptr<ComposerCommandEngine> createCommandEngine() override;
+  dvr::VrHwc& mVrHal;
 };
 
 } // namespace dvr

@@ -63,7 +63,7 @@ public:
 
     // Creates a velocity tracker using the specified strategy.
     // If strategy is NULL, uses the default strategy for the platform.
-    VelocityTracker(const char* strategy = NULL);
+    VelocityTracker(const char* strategy = nullptr);
 
     ~VelocityTracker();
 
@@ -261,6 +261,40 @@ private:
     };
 
     uint32_t mIndex;
+    Movement mMovements[HISTORY_SIZE];
+};
+
+class ImpulseVelocityTrackerStrategy : public VelocityTrackerStrategy {
+public:
+    ImpulseVelocityTrackerStrategy();
+    virtual ~ImpulseVelocityTrackerStrategy();
+
+    virtual void clear();
+    virtual void clearPointers(BitSet32 idBits);
+    virtual void addMovement(nsecs_t eventTime, BitSet32 idBits,
+            const VelocityTracker::Position* positions);
+    virtual bool getEstimator(uint32_t id, VelocityTracker::Estimator* outEstimator) const;
+
+private:
+    // Sample horizon.
+    // We don't use too much history by default since we want to react to quick
+    // changes in direction.
+    static constexpr nsecs_t HORIZON = 100 * 1000000; // 100 ms
+
+    // Number of samples to keep.
+    static constexpr size_t HISTORY_SIZE = 20;
+
+    struct Movement {
+        nsecs_t eventTime;
+        BitSet32 idBits;
+        VelocityTracker::Position positions[MAX_POINTERS];
+
+        inline const VelocityTracker::Position& getPosition(uint32_t id) const {
+            return positions[idBits.getIndexOfBit(id)];
+        }
+    };
+
+    size_t mIndex;
     Movement mMovements[HISTORY_SIZE];
 };
 

@@ -8,6 +8,8 @@
 
 #include <dvr/dvr_display_types.h>
 
+#include <dvr/dvr_api.h>
+#include <pdx/rpc/buffer_wrapper.h>
 #include <pdx/rpc/remote_method.h>
 #include <pdx/rpc/serializable.h>
 #include <pdx/rpc/variant.h>
@@ -58,11 +60,13 @@ class Flags {
   using Base = Flags<Integer>;
   using Type = Integer;
 
+  // NOLINTNEXTLINE(google-explicit-constructor)
   Flags(const Integer& value) : value_{value} {}
   Flags(const Flags&) = default;
   Flags& operator=(const Flags&) = default;
 
   Integer value() const { return value_; }
+  // NOLINTNEXTLINE(google-explicit-constructor)
   operator Integer() const { return value_; }
 
   bool IsSet(Integer bits) const { return (value_ & bits) == bits; }
@@ -184,6 +188,12 @@ struct SurfaceInfo {
   PDX_SERIALIZABLE_MEMBERS(SurfaceInfo, surface_id, visible, z_order);
 };
 
+enum class ConfigFileType : uint32_t {
+  kLensMetrics,
+  kDeviceMetrics,
+  kDeviceConfiguration
+};
+
 struct DisplayProtocol {
   // Service path.
   static constexpr char kClientPath[] = "system/vr/display/client";
@@ -191,7 +201,10 @@ struct DisplayProtocol {
   // Op codes.
   enum {
     kOpGetMetrics = 0,
-    kOpGetNamedBuffer,
+    kOpGetConfigurationData,
+    kOpSetupGlobalBuffer,
+    kOpDeleteGlobalBuffer,
+    kOpGetGlobalBuffer,
     kOpIsVrAppRunning,
     kOpCreateSurface,
     kOpGetSurfaceInfo,
@@ -205,14 +218,22 @@ struct DisplayProtocol {
 
   // Methods.
   PDX_REMOTE_METHOD(GetMetrics, kOpGetMetrics, Metrics(Void));
-  PDX_REMOTE_METHOD(GetNamedBuffer, kOpGetNamedBuffer,
-                    LocalNativeBufferHandle(std::string name));
+  PDX_REMOTE_METHOD(GetConfigurationData, kOpGetConfigurationData,
+                    std::string(ConfigFileType config_type));
+  PDX_REMOTE_METHOD(SetupGlobalBuffer, kOpSetupGlobalBuffer,
+                    LocalNativeBufferHandle(DvrGlobalBufferKey key, size_t size,
+                                            uint64_t usage));
+  PDX_REMOTE_METHOD(DeleteGlobalBuffer, kOpDeleteGlobalBuffer,
+                    void(DvrGlobalBufferKey key));
+  PDX_REMOTE_METHOD(GetGlobalBuffer, kOpGetGlobalBuffer,
+                    LocalNativeBufferHandle(DvrGlobalBufferKey key));
   PDX_REMOTE_METHOD(IsVrAppRunning, kOpIsVrAppRunning, bool(Void));
   PDX_REMOTE_METHOD(CreateSurface, kOpCreateSurface,
                     SurfaceInfo(const SurfaceAttributes& attributes));
   PDX_REMOTE_METHOD(GetSurfaceInfo, kOpGetSurfaceInfo, SurfaceInfo(Void));
-  PDX_REMOTE_METHOD(CreateQueue, kOpCreateQueue,
-                    LocalChannelHandle(size_t meta_size_bytes));
+  PDX_REMOTE_METHOD(
+      CreateQueue, kOpCreateQueue,
+      LocalChannelHandle(const ProducerQueueConfig& producer_config));
   PDX_REMOTE_METHOD(SetAttributes, kOpSetAttributes,
                     void(const SurfaceAttributes& attributes));
 };
@@ -225,7 +246,6 @@ struct DisplayManagerProtocol {
   enum {
     kOpGetSurfaceState = 0,
     kOpGetSurfaceQueue,
-    kOpSetupNamedBuffer,
   };
 
   // Aliases.
@@ -237,9 +257,6 @@ struct DisplayManagerProtocol {
                     std::vector<SurfaceState>(Void));
   PDX_REMOTE_METHOD(GetSurfaceQueue, kOpGetSurfaceQueue,
                     LocalChannelHandle(int surface_id, int queue_id));
-  PDX_REMOTE_METHOD(SetupNamedBuffer, kOpSetupNamedBuffer,
-                    LocalNativeBufferHandle(const std::string& name,
-                                            size_t size, uint64_t usage));
 };
 
 struct VSyncSchedInfo {

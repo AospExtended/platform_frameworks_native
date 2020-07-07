@@ -15,11 +15,18 @@
 cc_library_shared {
     name: "libui",
     vendor_available: true,
+    vndk: {
+        enabled: true,
+    },
+    double_loadable: true,
 
     clang: true,
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
     cppflags: [
         "-Weverything",
-        "-Werror",
 
         // The static constructors and destructors in this library have not been noted to
         // introduce significant overheads
@@ -38,27 +45,44 @@ cc_library_shared {
 
         // Don't warn about struct padding
         "-Wno-padded",
+
+        "-Wno-switch-enum",
     ],
 
+    product_variables: {
+        aosp: {
+            additional_gralloc_10_usage_bits: {
+                cppflags: ["-DADDNL_GRALLOC_10_USAGE_BITS=%s"],
+            },
+        },
+    },
+
     sanitize: {
-        //misc_undefined: ["integer"],
+        integer_overflow: true,
     },
 
     srcs: [
         "ColorSpace.cpp",
+        "BufferHubBuffer.cpp",
+        "BufferHubEventFd.cpp",
+        "BufferHubMetadata.cpp",
         "DebugUtils.cpp",
         "Fence.cpp",
         "FenceTime.cpp",
         "FrameStats.cpp",
+        "Gralloc.cpp",
         "Gralloc2.cpp",
+        "Gralloc3.cpp",
         "GraphicBuffer.cpp",
         "GraphicBufferAllocator.cpp",
         "GraphicBufferMapper.cpp",
-        "GraphicsEnv.cpp",
         "HdrCapabilities.cpp",
         "PixelFormat.cpp",
+        "PublicFormat.cpp",
         "Rect.cpp",
         "Region.cpp",
+        "Size.cpp",
+        "Transform.cpp",
         "UiConfig.cpp",
     ],
 
@@ -66,13 +90,18 @@ cc_library_shared {
         "frameworks/native/include",
     ],
 
+    // Uncomment the following line to enable VALIDATE_REGIONS traces
+    //defaults: ["libui-validate-regions-defaults"],
+
     shared_libs: [
+        "android.frameworks.bufferhub@1.0",
         "android.hardware.graphics.allocator@2.0",
+        "android.hardware.graphics.allocator@3.0",
+        "android.hardware.graphics.common@1.2",
         "android.hardware.graphics.mapper@2.0",
-        "android.hardware.configstore@1.0",
-	"android.hardware.configstore-utils",
+        "android.hardware.graphics.mapper@2.1",
+        "android.hardware.graphics.mapper@3.0",
         "libbase",
-        "libnativeloader",
         "libcutils",
         "libhardware",
         "libhidlbase",
@@ -83,16 +112,87 @@ cc_library_shared {
         "liblog",
     ],
 
+    export_shared_lib_headers: [
+        "android.hardware.graphics.common@1.2",
+    ],
+
     static_libs: [
         "libarect",
         "libgrallocusage",
         "libmath",
     ],
 
+    // bufferhub is not used when building libgui for vendors
+    target: {
+        vendor: {
+            cflags: ["-DLIBUI_IN_VNDK"],
+            exclude_srcs: [
+                "BufferHubBuffer.cpp",
+                "BufferHubEventFd.cpp",
+                "BufferHubMetadata.cpp",
+            ],
+            exclude_header_libs: [
+                "libbufferhub_headers",
+                "libdvr_headers",
+            ],
+            exclude_shared_libs: [
+                "android.frameworks.bufferhub@1.0",
+                "libpdx_default_transport",
+            ],
+        },
+    },
+
+    header_libs: [
+        "libbase_headers",
+        "libbufferhub_headers",
+        "libdvr_headers",
+        "libnativebase_headers",
+        "libnativewindow_headers",
+        "libhardware_headers",
+        "libui_headers",
+        "libpdx_headers",
+    ],
+
     export_static_lib_headers: [
         "libarect",
         "libmath",
     ],
+
+    export_header_lib_headers: [
+        "libbase_headers",
+        "libnativebase_headers",
+        "libnativewindow_headers",
+        "libhardware_headers",
+        "libui_headers",
+    ],
 }
 
-subdirs = ["tests"]
+cc_library_headers {
+    name: "libui_headers",
+    export_include_dirs: ["include"],
+    vendor_available: true,
+    target: {
+        vendor: {
+            cflags: ["-DLIBUI_IN_VNDK"],
+            override_export_include_dirs: ["include_vndk"],
+        },
+    },
+    header_libs: [
+        "libnativewindow_headers",
+    ],
+    export_header_lib_headers: [
+        "libnativewindow_headers",
+    ],
+}
+
+// defaults to enable VALIDATE_REGIONS traces
+cc_defaults {
+    name: "libui-validate-regions-defaults",
+    shared_libs: ["libutilscallstack"],
+    cflags: ["-DVALIDATE_REGIONS"],
+}
+
+subdirs = [
+    "tests",
+    "tools",
+]

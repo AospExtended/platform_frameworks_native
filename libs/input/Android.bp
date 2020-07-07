@@ -28,12 +28,14 @@ cc_library {
         "Keyboard.cpp",
         "KeyCharacterMap.cpp",
         "KeyLayoutMap.cpp",
+        "TouchVideoFrame.cpp",
         "VirtualKeyMap.cpp",
     ],
 
     clang: true,
 
     shared_libs: [
+        "libbase",
         "liblog",
         "libcutils",
     ],
@@ -42,7 +44,10 @@ cc_library {
         android: {
             srcs: [
                 "IInputFlinger.cpp",
+                "InputApplication.cpp",
                 "InputTransport.cpp",
+                "InputWindow.cpp",
+                "ISetInputWindowsListener.cpp",
                 "VelocityControl.cpp",
                 "VelocityTracker.cpp",
             ],
@@ -50,6 +55,7 @@ cc_library {
             shared_libs: [
                 "libutils",
                 "libbinder",
+                "libui"
             ],
 
             sanitize: {

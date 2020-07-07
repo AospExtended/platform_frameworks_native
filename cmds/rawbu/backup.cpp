@@ -38,7 +38,7 @@ static char nameBuffer[PATH_MAX];
 static struct stat statBuffer;
 
 static char copyBuffer[8192];
-static char *backupFilePath = NULL;
+static char *backupFilePath = nullptr;
 
 static uint32_t inputFileVersion;
 
@@ -58,7 +58,7 @@ static const struct special_dir SKIP_PATHS[] = {
     { "/data/system/batterystats.bin", SPECIAL_NO_TOUCH },
     { "/data/system/location", SPECIAL_NO_TOUCH },
     { "/data/dalvik-cache", SPECIAL_NO_BACKUP },
-    { NULL, 0 },
+    { nullptr, 0 },
 };
 
 /* This is just copied from the shell's built-in wipe command. */
@@ -71,7 +71,7 @@ static int wipe (const char *path)
 
     dir = opendir(path);
 
-    if (dir == NULL) {
+    if (dir == nullptr) {
         fprintf (stderr, "Error opendir'ing %s: %s\n",
                     path, strerror(errno));
         return 0;
@@ -87,7 +87,7 @@ static int wipe (const char *path)
     for (;;) {
         de = readdir(dir);
 
-        if (de == NULL) {
+        if (de == nullptr) {
             break;
         }
 
@@ -115,7 +115,7 @@ static int wipe (const char *path)
             }
         }
         
-        if (!noBackup && SKIP_PATHS[i].path != NULL) {
+        if (!noBackup && SKIP_PATHS[i].path != nullptr) {
             // This is a SPECIAL_NO_TOUCH directory.
             continue;
         }
@@ -129,7 +129,6 @@ static int wipe (const char *path)
         }
 
         if(S_ISDIR(statBuffer.st_mode)) {
-            int i;
             char *newpath;
 
             newpath = strdup(nameBuffer);
@@ -204,7 +203,7 @@ static int copy_file(FILE* dest, FILE* src, off_t size, const char* destName,
         int amt = size > (off_t)sizeof(copyBuffer) ? sizeof(copyBuffer) : (int)size;
         int readLen = fread(copyBuffer, 1, amt, src);
         if (readLen <= 0) {
-            if (srcName != NULL) {
+            if (srcName != nullptr) {
                 fprintf(stderr, "unable to read source (%d of %ld bytes) file '%s': %s\n",
                     amt, origSize, srcName, errno != 0 ? strerror(errno) : "unexpected EOF");
             } else {
@@ -215,7 +214,7 @@ static int copy_file(FILE* dest, FILE* src, off_t size, const char* destName,
         }
         int writeLen = fwrite(copyBuffer, 1, readLen, dest); 
         if (writeLen != readLen) {
-            if (destName != NULL) {
+            if (destName != nullptr) {
                 fprintf(stderr, "unable to write file (%d of %d bytes) '%s': '%s'\n",
                     writeLen, readLen, destName, strerror(errno));
             } else {
@@ -257,14 +256,14 @@ static int backup_dir(FILE* fh, const char* srcPath)
 {
     DIR *dir;
     struct dirent *de;
-    char* fullPath = NULL;
+    char* fullPath = nullptr;
     int srcLen = strlen(srcPath);
     int result = 1;
     int i;
     
     dir = opendir(srcPath);
 
-    if (dir == NULL) {
+    if (dir == nullptr) {
         fprintf (stderr, "error opendir'ing '%s': %s\n",
                     srcPath, strerror(errno));
         return 0;
@@ -273,7 +272,7 @@ static int backup_dir(FILE* fh, const char* srcPath)
     for (;;) {
         de = readdir(dir);
 
-        if (de == NULL) {
+        if (de == nullptr) {
             break;
         }
 
@@ -284,7 +283,7 @@ static int backup_dir(FILE* fh, const char* srcPath)
             continue;
         }
 
-        if (fullPath != NULL) {
+        if (fullPath != nullptr) {
             free(fullPath);
         }
         fullPath = (char*)malloc(srcLen + strlen(de->d_name) + 2);
@@ -299,7 +298,7 @@ static int backup_dir(FILE* fh, const char* srcPath)
                     break;
                 }
             }
-            if (SKIP_PATHS[i].path != NULL) {
+            if (SKIP_PATHS[i].path != nullptr) {
                 continue;
             }
         }
@@ -344,14 +343,14 @@ static int backup_dir(FILE* fh, const char* srcPath)
             }
             
             FILE* src = fopen(fullPath, "r");
-            if (src == NULL) {
+            if (src == nullptr) {
                 fprintf(stderr, "unable to open source file '%s': %s\n",
                     fullPath, strerror(errno));
                 result = 0;
                 goto done;
             }
             
-            int copyres = copy_file(fh, src, size, NULL, fullPath);
+            int copyres = copy_file(fh, src, size, nullptr, fullPath);
             fclose(src);
             if (!copyres) {
                 result = 0;
@@ -361,7 +360,7 @@ static int backup_dir(FILE* fh, const char* srcPath)
     }
 
 done:
-    if (fullPath != NULL) {
+    if (fullPath != nullptr) {
         free(fullPath);
     }
     
@@ -375,7 +374,7 @@ static int backup_data(const char* destPath)
     int res = -1;
     
     FILE* fh = fopen(destPath, "w");
-    if (fh == NULL) {
+    if (fh == nullptr) {
         fprintf(stderr, "unable to open destination '%s': %s\n",
                 destPath, strerror(errno));
         return -1;
@@ -505,7 +504,7 @@ static int restore_data(const char* srcPath)
     int res = -1;
     
     FILE* fh = fopen(srcPath, "r");
-    if (fh == NULL) {
+    if (fh == nullptr) {
         fprintf(stderr, "Unable to open source '%s': %s\n",
                 srcPath, strerror(errno));
         return -1;
@@ -535,7 +534,7 @@ static int restore_data(const char* srcPath)
 
     while (1) {
         int type;
-        char* path = NULL;
+        char* path = nullptr;
         if (read_header(fh, &type, &path, &statBuffer) == 0) {
             goto done;
         }
@@ -571,14 +570,14 @@ static int restore_data(const char* srcPath)
             printf("Restoring file %s...\n", path);
             
             FILE* dest = fopen(path, "w");
-            if (dest == NULL) {
+            if (dest == nullptr) {
                 fprintf(stderr, "unable to open destination file '%s': %s\n",
                     path, strerror(errno));
                 free(path);
                 goto done;
             }
             
-            int copyres = copy_file(dest, fh, size, path, NULL);
+            int copyres = copy_file(dest, fh, size, path, nullptr);
             fclose(dest);
             if (!copyres) {
                 free(path);

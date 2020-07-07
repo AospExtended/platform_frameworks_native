@@ -23,13 +23,16 @@
 // Log debug messages about the progress of the algorithm itself.
 #define DEBUG_STRATEGY 0
 
-#include <math.h>
+#include <array>
+#include <inttypes.h>
 #include <limits.h>
+#include <math.h>
+#include <optional>
 
+#include <android-base/stringprintf.h>
 #include <cutils/properties.h>
 #include <input/VelocityTracker.h>
 #include <utils/BitSet.h>
-#include <utils/String8.h>
 #include <utils/Timers.h>
 
 namespace android {
@@ -46,8 +49,7 @@ static const nsecs_t ASSUME_POINTER_STOPPED_TIME = 40 * NANOS_PER_MS;
 
 static float vectorDot(const float* a, const float* b, uint32_t m) {
     float r = 0;
-    while (m) {
-        m--;
+    for (size_t i = 0; i < m; i++) {
         r += *(a++) * *(b++);
     }
     return r;
@@ -55,8 +57,7 @@ static float vectorDot(const float* a, const float* b, uint32_t m) {
 
 static float vectorNorm(const float* a, uint32_t m) {
     float r = 0;
-    while (m) {
-        m--;
+    for (size_t i = 0; i < m; i++) {
         float t = *(a++);
         r += t * t;
     }
@@ -64,36 +65,38 @@ static float vectorNorm(const float* a, uint32_t m) {
 }
 
 #if DEBUG_STRATEGY || DEBUG_VELOCITY
-static String8 vectorToString(const float* a, uint32_t m) {
-    String8 str;
-    str.append("[");
-    while (m--) {
-        str.appendFormat(" %f", *(a++));
-        if (m) {
-            str.append(",");
-        }
-    }
-    str.append(" ]");
-    return str;
-}
-
-static String8 matrixToString(const float* a, uint32_t m, uint32_t n, bool rowMajor) {
-    String8 str;
-    str.append("[");
+static std::string vectorToString(const float* a, uint32_t m) {
+    std::string str;
+    str += "[";
     for (size_t i = 0; i < m; i++) {
         if (i) {
-            str.append(",");
+            str += ",";
         }
-        str.append(" [");
+        str += android::base::StringPrintf(" %f", *(a++));
+    }
+    str += " ]";
+    return str;
+}
+#endif
+
+#if DEBUG_STRATEGY
+static std::string matrixToString(const float* a, uint32_t m, uint32_t n, bool rowMajor) {
+    std::string str;
+    str = "[";
+    for (size_t i = 0; i < m; i++) {
+        if (i) {
+            str += ",";
+        }
+        str += " [";
         for (size_t j = 0; j < n; j++) {
             if (j) {
-                str.append(",");
+                str += ",";
             }
-            str.appendFormat(" %f", a[rowMajor ? i * n + j : j * m + i]);
+            str += android::base::StringPrintf(" %f", a[rowMajor ? i * n + j : j * m + i]);
         }
-        str.append(" ]");
+        str += " ]";
     }
-    str.append(" ]");
+    str += " ]";
     return str;
 }
 #endif
@@ -114,7 +117,7 @@ VelocityTracker::VelocityTracker(const char* strategy) :
 
     // Allow the default strategy to be overridden using a system property for debugging.
     if (!strategy) {
-        int length = property_get("debug.velocitytracker.strategy", value, NULL);
+        int length = property_get("persist.input.velocitytracker.strategy", value, nullptr);
         if (length > 0) {
             strategy = value;
         } else {
@@ -138,10 +141,15 @@ VelocityTracker::~VelocityTracker() {
 
 bool VelocityTracker::configureStrategy(const char* strategy) {
     mStrategy = createStrategy(strategy);
-    return mStrategy != NULL;
+    return mStrategy != nullptr;
 }
 
 VelocityTrackerStrategy* VelocityTracker::createStrategy(const char* strategy) {
+    if (!strcmp("impulse", strategy)) {
+        // Physical model of pushing an object.  Quality: VERY GOOD.
+        // Works with duplicate coordinates, unclean finger liftoff.
+        return new ImpulseVelocityTrackerStrategy();
+    }
     if (!strcmp("lsq1", strategy)) {
         // 1st order least squares.  Quality: POOR.
         // Frequently underfits the touch data especially when the finger accelerates
@@ -198,7 +206,7 @@ VelocityTrackerStrategy* VelocityTracker::createStrategy(const char* strategy) {
         // time to adjust to changes in direction.
         return new LegacyVelocityTrackerStrategy();
     }
-    return NULL;
+    return nullptr;
 }
 
 void VelocityTracker::clear() {
@@ -244,7 +252,7 @@ void VelocityTracker::addMovement(nsecs_t eventTime, BitSet32 idBits, const Posi
     mStrategy->addMovement(eventTime, idBits, positions);
 
 #if DEBUG_VELOCITY
-    ALOGD("VelocityTracker: addMovement eventTime=%lld, idBits=0x%08x, activePointerId=%d",
+    ALOGD("VelocityTracker: addMovement eventTime=%" PRId64 ", idBits=0x%08x, activePointerId=%d",
             eventTime, idBits.value, mActivePointerId);
     for (BitSet32 iterBits(idBits); !iterBits.isEmpty(); ) {
         uint32_t id = iterBits.firstMarkedBit();
@@ -256,8 +264,8 @@ void VelocityTracker::addMovement(nsecs_t eventTime, BitSet32 idBits, const Posi
                 "estimator (degree=%d, xCoeff=%s, yCoeff=%s, confidence=%f)",
                 id, positions[index].x, positions[index].y,
                 int(estimator.degree),
-                vectorToString(estimator.xCoeff, estimator.degree + 1).string(),
-                vectorToString(estimator.yCoeff, estimator.degree + 1).string(),
+                vectorToString(estimator.xCoeff, estimator.degree + 1).c_str(),
+                vectorToString(estimator.yCoeff, estimator.degree + 1).c_str(),
                 estimator.confidence);
     }
 #endif
@@ -353,9 +361,6 @@ bool VelocityTracker::getEstimator(uint32_t id, Estimator* outEstimator) const {
 
 // --- LeastSquaresVelocityTrackerStrategy ---
 
-const nsecs_t LeastSquaresVelocityTrackerStrategy::HORIZON;
-const uint32_t LeastSquaresVelocityTrackerStrategy::HISTORY_SIZE;
-
 LeastSquaresVelocityTrackerStrategy::LeastSquaresVelocityTrackerStrategy(
         uint32_t degree, Weighting weighting) :
         mDegree(degree), mWeighting(weighting) {
@@ -377,7 +382,16 @@ void LeastSquaresVelocityTrackerStrategy::clearPointers(BitSet32 idBits) {
 
 void LeastSquaresVelocityTrackerStrategy::addMovement(nsecs_t eventTime, BitSet32 idBits,
         const VelocityTracker::Position* positions) {
-    if (++mIndex == HISTORY_SIZE) {
+    if (mMovements[mIndex].eventTime != eventTime) {
+        // When ACTION_POINTER_DOWN happens, we will first receive ACTION_MOVE with the coordinates
+        // of the existing pointers, and then ACTION_POINTER_DOWN with the coordinates that include
+        // the new pointer. If the eventtimes for both events are identical, just update the data
+        // for this time.
+        // We only compare against the last value, as it is likely that addMovement is called
+        // in chronological order as events occur.
+        mIndex++;
+    }
+    if (mIndex == HISTORY_SIZE) {
         mIndex = 0;
     }
 
@@ -443,8 +457,8 @@ static bool solveLeastSquares(const float* x, const float* y,
         const float* w, uint32_t m, uint32_t n, float* outB, float* outDet) {
 #if DEBUG_STRATEGY
     ALOGD("solveLeastSquares: m=%d, n=%d, x=%s, y=%s, w=%s", int(m), int(n),
-            vectorToString(x, m).string(), vectorToString(y, m).string(),
-            vectorToString(w, m).string());
+            vectorToString(x, m).c_str(), vectorToString(y, m).c_str(),
+            vectorToString(w, m).c_str());
 #endif
 
     // Expand the X vector to a matrix A, pre-multiplied by the weights.
@@ -456,7 +470,7 @@ static bool solveLeastSquares(const float* x, const float* y,
         }
     }
 #if DEBUG_STRATEGY
-    ALOGD("  - a=%s", matrixToString(&a[0][0], m, n, false /*rowMajor*/).string());
+    ALOGD("  - a=%s", matrixToString(&a[0][0], m, n, false /*rowMajor*/).c_str());
 #endif
 
     // Apply the Gram-Schmidt process to A to obtain its QR decomposition.
@@ -491,8 +505,8 @@ static bool solveLeastSquares(const float* x, const float* y,
         }
     }
 #if DEBUG_STRATEGY
-    ALOGD("  - q=%s", matrixToString(&q[0][0], m, n, false /*rowMajor*/).string());
-    ALOGD("  - r=%s", matrixToString(&r[0][0], n, n, true /*rowMajor*/).string());
+    ALOGD("  - q=%s", matrixToString(&q[0][0], m, n, false /*rowMajor*/).c_str());
+    ALOGD("  - r=%s", matrixToString(&r[0][0], n, n, true /*rowMajor*/).c_str());
 
     // calculate QR, if we factored A correctly then QR should equal A
     float qr[n][m];
@@ -504,7 +518,7 @@ static bool solveLeastSquares(const float* x, const float* y,
             }
         }
     }
-    ALOGD("  - qr=%s", matrixToString(&qr[0][0], m, n, false /*rowMajor*/).string());
+    ALOGD("  - qr=%s", matrixToString(&qr[0][0], m, n, false /*rowMajor*/).c_str());
 #endif
 
     // Solve R B = Qt W Y to find B.  This is easy because R is upper triangular.
@@ -522,7 +536,7 @@ static bool solveLeastSquares(const float* x, const float* y,
         outB[i] /= r[i][i];
     }
 #if DEBUG_STRATEGY
-    ALOGD("  - b=%s", vectorToString(outB, n).string());
+    ALOGD("  - b=%s", vectorToString(outB, n).c_str());
 #endif
 
     // Calculate the coefficient of determination as 1 - (SSerr / SStot) where
@@ -555,6 +569,58 @@ static bool solveLeastSquares(const float* x, const float* y,
     ALOGD("  - det=%f", *outDet);
 #endif
     return true;
+}
+
+/*
+ * Optimized unweighted second-order least squares fit. About 2x speed improvement compared to
+ * the default implementation
+ */
+static std::optional<std::array<float, 3>> solveUnweightedLeastSquaresDeg2(
+        const float* x, const float* y, size_t count) {
+    // Solving y = a*x^2 + b*x + c
+    float sxi = 0, sxiyi = 0, syi = 0, sxi2 = 0, sxi3 = 0, sxi2yi = 0, sxi4 = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        float xi = x[i];
+        float yi = y[i];
+        float xi2 = xi*xi;
+        float xi3 = xi2*xi;
+        float xi4 = xi3*xi;
+        float xiyi = xi*yi;
+        float xi2yi = xi2*yi;
+
+        sxi += xi;
+        sxi2 += xi2;
+        sxiyi += xiyi;
+        sxi2yi += xi2yi;
+        syi += yi;
+        sxi3 += xi3;
+        sxi4 += xi4;
+    }
+
+    float Sxx = sxi2 - sxi*sxi / count;
+    float Sxy = sxiyi - sxi*syi / count;
+    float Sxx2 = sxi3 - sxi*sxi2 / count;
+    float Sx2y = sxi2yi - sxi2*syi / count;
+    float Sx2x2 = sxi4 - sxi2*sxi2 / count;
+
+    float denominator = Sxx*Sx2x2 - Sxx2*Sxx2;
+    if (denominator == 0) {
+        ALOGW("division by 0 when computing velocity, Sxx=%f, Sx2x2=%f, Sxx2=%f", Sxx, Sx2x2, Sxx2);
+        return std::nullopt;
+    }
+    // Compute a
+    float numerator = Sx2y*Sxx - Sxy*Sxx2;
+    float a = numerator / denominator;
+
+    // Compute b
+    numerator = Sxy*Sx2x2 - Sx2y*Sxx2;
+    float b = numerator / denominator;
+
+    // Compute c
+    float c = syi/count - b * sxi/count - a * sxi2/count;
+
+    return std::make_optional(std::array<float, 3>({c, b, a}));
 }
 
 bool LeastSquaresVelocityTrackerStrategy::getEstimator(uint32_t id,
@@ -597,7 +663,23 @@ bool LeastSquaresVelocityTrackerStrategy::getEstimator(uint32_t id,
     if (degree > m - 1) {
         degree = m - 1;
     }
-    if (degree >= 1) {
+
+    if (degree == 2 && mWeighting == WEIGHTING_NONE) {
+        // Optimize unweighted, quadratic polynomial fit
+        std::optional<std::array<float, 3>> xCoeff = solveUnweightedLeastSquaresDeg2(time, x, m);
+        std::optional<std::array<float, 3>> yCoeff = solveUnweightedLeastSquaresDeg2(time, y, m);
+        if (xCoeff && yCoeff) {
+            outEstimator->time = newestMovement.eventTime;
+            outEstimator->degree = 2;
+            outEstimator->confidence = 1;
+            for (size_t i = 0; i <= outEstimator->degree; i++) {
+                outEstimator->xCoeff[i] = (*xCoeff)[i];
+                outEstimator->yCoeff[i] = (*yCoeff)[i];
+            }
+            return true;
+        }
+    } else if (degree >= 1) {
+        // General case for an Nth degree polynomial fit
         float xdet, ydet;
         uint32_t n = degree + 1;
         if (solveLeastSquares(time, x, w, m, n, outEstimator->xCoeff, &xdet)
@@ -608,8 +690,8 @@ bool LeastSquaresVelocityTrackerStrategy::getEstimator(uint32_t id,
 #if DEBUG_STRATEGY
             ALOGD("estimate: degree=%d, xCoeff=%s, yCoeff=%s, confidence=%f",
                     int(outEstimator->degree),
-                    vectorToString(outEstimator->xCoeff, n).string(),
-                    vectorToString(outEstimator->yCoeff, n).string(),
+                    vectorToString(outEstimator->xCoeff, n).c_str(),
+                    vectorToString(outEstimator->yCoeff, n).c_str(),
                     outEstimator->confidence);
 #endif
             return true;
@@ -811,10 +893,6 @@ void IntegratingVelocityTrackerStrategy::populateEstimator(const State& state,
 
 // --- LegacyVelocityTrackerStrategy ---
 
-const nsecs_t LegacyVelocityTrackerStrategy::HORIZON;
-const uint32_t LegacyVelocityTrackerStrategy::HISTORY_SIZE;
-const nsecs_t LegacyVelocityTrackerStrategy::MIN_DURATION;
-
 LegacyVelocityTrackerStrategy::LegacyVelocityTrackerStrategy() {
     clear();
 }
@@ -924,6 +1002,205 @@ bool LegacyVelocityTrackerStrategy::getEstimator(uint32_t id,
     } else {
         outEstimator->degree = 0;
     }
+    return true;
+}
+
+// --- ImpulseVelocityTrackerStrategy ---
+
+ImpulseVelocityTrackerStrategy::ImpulseVelocityTrackerStrategy() {
+    clear();
+}
+
+ImpulseVelocityTrackerStrategy::~ImpulseVelocityTrackerStrategy() {
+}
+
+void ImpulseVelocityTrackerStrategy::clear() {
+    mIndex = 0;
+    mMovements[0].idBits.clear();
+}
+
+void ImpulseVelocityTrackerStrategy::clearPointers(BitSet32 idBits) {
+    BitSet32 remainingIdBits(mMovements[mIndex].idBits.value & ~idBits.value);
+    mMovements[mIndex].idBits = remainingIdBits;
+}
+
+void ImpulseVelocityTrackerStrategy::addMovement(nsecs_t eventTime, BitSet32 idBits,
+        const VelocityTracker::Position* positions) {
+    if (mMovements[mIndex].eventTime != eventTime) {
+        // When ACTION_POINTER_DOWN happens, we will first receive ACTION_MOVE with the coordinates
+        // of the existing pointers, and then ACTION_POINTER_DOWN with the coordinates that include
+        // the new pointer. If the eventtimes for both events are identical, just update the data
+        // for this time.
+        // We only compare against the last value, as it is likely that addMovement is called
+        // in chronological order as events occur.
+        mIndex++;
+    }
+    if (mIndex == HISTORY_SIZE) {
+        mIndex = 0;
+    }
+
+    Movement& movement = mMovements[mIndex];
+    movement.eventTime = eventTime;
+    movement.idBits = idBits;
+    uint32_t count = idBits.count();
+    for (uint32_t i = 0; i < count; i++) {
+        movement.positions[i] = positions[i];
+    }
+}
+
+/**
+ * Calculate the total impulse provided to the screen and the resulting velocity.
+ *
+ * The touchscreen is modeled as a physical object.
+ * Initial condition is discussed below, but for now suppose that v(t=0) = 0
+ *
+ * The kinetic energy of the object at the release is E=0.5*m*v^2
+ * Then vfinal = sqrt(2E/m). The goal is to calculate E.
+ *
+ * The kinetic energy at the release is equal to the total work done on the object by the finger.
+ * The total work W is the sum of all dW along the path.
+ *
+ * dW = F*dx, where dx is the piece of path traveled.
+ * Force is change of momentum over time, F = dp/dt = m dv/dt.
+ * Then substituting:
+ * dW = m (dv/dt) * dx = m * v * dv
+ *
+ * Summing along the path, we get:
+ * W = sum(dW) = sum(m * v * dv) = m * sum(v * dv)
+ * Since the mass stays constant, the equation for final velocity is:
+ * vfinal = sqrt(2*sum(v * dv))
+ *
+ * Here,
+ * dv : change of velocity = (v[i+1]-v[i])
+ * dx : change of distance = (x[i+1]-x[i])
+ * dt : change of time = (t[i+1]-t[i])
+ * v : instantaneous velocity = dx/dt
+ *
+ * The final formula is:
+ * vfinal = sqrt(2) * sqrt(sum((v[i]-v[i-1])*|v[i]|)) for all i
+ * The absolute value is needed to properly account for the sign. If the velocity over a
+ * particular segment descreases, then this indicates braking, which means that negative
+ * work was done. So for two positive, but decreasing, velocities, this contribution would be
+ * negative and will cause a smaller final velocity.
+ *
+ * Initial condition
+ * There are two ways to deal with initial condition:
+ * 1) Assume that v(0) = 0, which would mean that the screen is initially at rest.
+ * This is not entirely accurate. We are only taking the past X ms of touch data, where X is
+ * currently equal to 100. However, a touch event that created a fling probably lasted for longer
+ * than that, which would mean that the user has already been interacting with the touchscreen
+ * and it has probably already been moving.
+ * 2) Assume that the touchscreen has already been moving at a certain velocity, calculate this
+ * initial velocity and the equivalent energy, and start with this initial energy.
+ * Consider an example where we have the following data, consisting of 3 points:
+ *                 time: t0, t1, t2
+ *                 x   : x0, x1, x2
+ *                 v   : 0 , v1, v2
+ * Here is what will happen in each of these scenarios:
+ * 1) By directly applying the formula above with the v(0) = 0 boundary condition, we will get
+ * vfinal = sqrt(2*(|v1|*(v1-v0) + |v2|*(v2-v1))). This can be simplified since v0=0
+ * vfinal = sqrt(2*(|v1|*v1 + |v2|*(v2-v1))) = sqrt(2*(v1^2 + |v2|*(v2 - v1)))
+ * since velocity is a real number
+ * 2) If we treat the screen as already moving, then it must already have an energy (per mass)
+ * equal to 1/2*v1^2. Then the initial energy should be 1/2*v1*2, and only the second segment
+ * will contribute to the total kinetic energy (since we can effectively consider that v0=v1).
+ * This will give the following expression for the final velocity:
+ * vfinal = sqrt(2*(1/2*v1^2 + |v2|*(v2-v1)))
+ * This analysis can be generalized to an arbitrary number of samples.
+ *
+ *
+ * Comparing the two equations above, we see that the only mathematical difference
+ * is the factor of 1/2 in front of the first velocity term.
+ * This boundary condition would allow for the "proper" calculation of the case when all of the
+ * samples are equally spaced in time and distance, which should suggest a constant velocity.
+ *
+ * Note that approach 2) is sensitive to the proper ordering of the data in time, since
+ * the boundary condition must be applied to the oldest sample to be accurate.
+ */
+static float kineticEnergyToVelocity(float work) {
+    static constexpr float sqrt2 = 1.41421356237;
+    return (work < 0 ? -1.0 : 1.0) * sqrtf(fabsf(work)) * sqrt2;
+}
+
+static float calculateImpulseVelocity(const nsecs_t* t, const float* x, size_t count) {
+    // The input should be in reversed time order (most recent sample at index i=0)
+    // t[i] is in nanoseconds, but due to FP arithmetic, convert to seconds inside this function
+    static constexpr float SECONDS_PER_NANO = 1E-9;
+
+    if (count < 2) {
+        return 0; // if 0 or 1 points, velocity is zero
+    }
+    if (t[1] > t[0]) { // Algorithm will still work, but not perfectly
+        ALOGE("Samples provided to calculateImpulseVelocity in the wrong order");
+    }
+    if (count == 2) { // if 2 points, basic linear calculation
+        if (t[1] == t[0]) {
+            ALOGE("Events have identical time stamps t=%" PRId64 ", setting velocity = 0", t[0]);
+            return 0;
+        }
+        return (x[1] - x[0]) / (SECONDS_PER_NANO * (t[1] - t[0]));
+    }
+    // Guaranteed to have at least 3 points here
+    float work = 0;
+    for (size_t i = count - 1; i > 0 ; i--) { // start with the oldest sample and go forward in time
+        if (t[i] == t[i-1]) {
+            ALOGE("Events have identical time stamps t=%" PRId64 ", skipping sample", t[i]);
+            continue;
+        }
+        float vprev = kineticEnergyToVelocity(work); // v[i-1]
+        float vcurr = (x[i] - x[i-1]) / (SECONDS_PER_NANO * (t[i] - t[i-1])); // v[i]
+        work += (vcurr - vprev) * fabsf(vcurr);
+        if (i == count - 1) {
+            work *= 0.5; // initial condition, case 2) above
+        }
+    }
+    return kineticEnergyToVelocity(work);
+}
+
+bool ImpulseVelocityTrackerStrategy::getEstimator(uint32_t id,
+        VelocityTracker::Estimator* outEstimator) const {
+    outEstimator->clear();
+
+    // Iterate over movement samples in reverse time order and collect samples.
+    float x[HISTORY_SIZE];
+    float y[HISTORY_SIZE];
+    nsecs_t time[HISTORY_SIZE];
+    size_t m = 0; // number of points that will be used for fitting
+    size_t index = mIndex;
+    const Movement& newestMovement = mMovements[mIndex];
+    do {
+        const Movement& movement = mMovements[index];
+        if (!movement.idBits.hasBit(id)) {
+            break;
+        }
+
+        nsecs_t age = newestMovement.eventTime - movement.eventTime;
+        if (age > HORIZON) {
+            break;
+        }
+
+        const VelocityTracker::Position& position = movement.getPosition(id);
+        x[m] = position.x;
+        y[m] = position.y;
+        time[m] = movement.eventTime;
+        index = (index == 0 ? HISTORY_SIZE : index) - 1;
+    } while (++m < HISTORY_SIZE);
+
+    if (m == 0) {
+        return false; // no data
+    }
+    outEstimator->xCoeff[0] = 0;
+    outEstimator->yCoeff[0] = 0;
+    outEstimator->xCoeff[1] = calculateImpulseVelocity(time, x, m);
+    outEstimator->yCoeff[1] = calculateImpulseVelocity(time, y, m);
+    outEstimator->xCoeff[2] = 0;
+    outEstimator->yCoeff[2] = 0;
+    outEstimator->time = newestMovement.eventTime;
+    outEstimator->degree = 2; // similar results to 2nd degree fit
+    outEstimator->confidence = 1;
+#if DEBUG_STRATEGY
+    ALOGD("velocity: (%f, %f)", outEstimator->xCoeff[1], outEstimator->yCoeff[1]);
+#endif
     return true;
 }
 

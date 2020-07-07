@@ -1,9 +1,10 @@
 #ifndef ANDROID_DVR_BUFFERHUB_RPC_H_
 #define ANDROID_DVR_BUFFERHUB_RPC_H_
 
+#include "buffer_hub_defs.h"
+
 #include <cutils/native_handle.h>
-#include <gui/BufferQueueDefs.h>
-#include <sys/types.h>
+#include <ui/BufferQueueDefs.h>
 
 #include <pdx/channel_handle.h>
 #include <pdx/file_handle.h>
@@ -37,8 +38,8 @@ class NativeBufferHandle {
       opaque_ints_.push_back(buffer.handle()->data[fd_count + i]);
     }
   }
-  NativeBufferHandle(NativeBufferHandle&& other) = default;
-  NativeBufferHandle& operator=(NativeBufferHandle&& other) = default;
+  NativeBufferHandle(NativeBufferHandle&& other) noexcept = default;
+  NativeBufferHandle& operator=(NativeBufferHandle&& other) noexcept = default;
 
   // Imports the native handle into the given IonBuffer instance.
   int Import(IonBuffer* buffer) {
@@ -93,6 +94,62 @@ class NativeBufferHandle {
   void operator=(const NativeBufferHandle&) = delete;
 };
 
+template <typename FileHandleType>
+class BufferDescription {
+ public:
+  BufferDescription() = default;
+  BufferDescription(const IonBuffer& buffer, const IonBuffer& metadata, int id,
+                    int buffer_cid, uint32_t client_state_mask,
+                    const FileHandleType& acquire_fence_fd,
+                    const FileHandleType& release_fence_fd)
+      : id_(id),
+        buffer_cid_(buffer_cid),
+        client_state_mask_(client_state_mask),
+        buffer_(buffer, id),
+        metadata_(metadata, id),
+        acquire_fence_fd_(acquire_fence_fd.Borrow()),
+        release_fence_fd_(release_fence_fd.Borrow()) {}
+
+  BufferDescription(BufferDescription&& other) noexcept = default;
+  BufferDescription& operator=(BufferDescription&& other) noexcept = default;
+
+  // ID of the buffer client. All BufferHub clients derived from the same buffer
+  // in bufferhubd share the same buffer id.
+  int id() const { return id_; }
+
+  // Channel ID of the buffer client. Each BufferHub client has its system
+  // unique channel id.
+  int buffer_cid() const { return buffer_cid_; }
+
+  // State mask of the buffer client. Each BufferHub client backed by the
+  // same buffer channel has uniqued state bit among its siblings.
+  uint32_t client_state_mask() const { return client_state_mask_; }
+  FileHandleType take_acquire_fence() { return std::move(acquire_fence_fd_); }
+  FileHandleType take_release_fence() { return std::move(release_fence_fd_); }
+
+  int ImportBuffer(IonBuffer* buffer) { return buffer_.Import(buffer); }
+  int ImportMetadata(IonBuffer* metadata) { return metadata_.Import(metadata); }
+
+ private:
+  int id_{-1};
+  int buffer_cid_{-1};
+  uint32_t client_state_mask_{0U};
+  // Two IonBuffers: one for the graphic buffer and one for metadata.
+  NativeBufferHandle<FileHandleType> buffer_;
+  NativeBufferHandle<FileHandleType> metadata_;
+
+  // Pamameters for shared fences.
+  FileHandleType acquire_fence_fd_;
+  FileHandleType release_fence_fd_;
+
+  PDX_SERIALIZABLE_MEMBERS(BufferDescription<FileHandleType>, id_, buffer_cid_,
+                           client_state_mask_, buffer_, metadata_,
+                           acquire_fence_fd_, release_fence_fd_);
+
+  BufferDescription(const BufferDescription&) = delete;
+  void operator=(const BufferDescription&) = delete;
+};
+
 using BorrowedNativeBufferHandle = NativeBufferHandle<pdx::BorrowedHandle>;
 using LocalNativeBufferHandle = NativeBufferHandle<pdx::LocalHandle>;
 
@@ -102,8 +159,8 @@ class FenceHandle {
   FenceHandle() = default;
   explicit FenceHandle(int fence) : fence_{fence} {}
   explicit FenceHandle(FileHandleType&& fence) : fence_{std::move(fence)} {}
-  FenceHandle(FenceHandle&&) = default;
-  FenceHandle& operator=(FenceHandle&&) = default;
+  FenceHandle(FenceHandle&&) noexcept = default;
+  FenceHandle& operator=(FenceHandle&&) noexcept = default;
 
   explicit operator bool() const { return fence_.IsValid(); }
 
@@ -129,19 +186,102 @@ class FenceHandle {
 using LocalFence = FenceHandle<pdx::LocalHandle>;
 using BorrowedFence = FenceHandle<pdx::BorrowedHandle>;
 
+struct ProducerQueueConfig {
+  // Whether the buffer queue is operating in Async mode.
+  // From GVR's perspective of view, this means a buffer can be acquired
+  // asynchronously by the compositor.
+  // From Android Surface's perspective of view, this is equivalent to
+  // IGraphicBufferProducer's async mode. When in async mode, a producer
+  // will never block even if consumer is running slow.
+  bool is_async;
+
+  // Default buffer width that is set during ProducerQueue's creation.
+  uint32_t default_width;
+
+  // Default buffer height that is set during ProducerQueue's creation.
+  uint32_t default_height;
+
+  // Default buffer format that is set during ProducerQueue's creation.
+  uint32_t default_format;
+
+  // Size of the meta data associated with all the buffers allocated from the
+  // queue.
+  size_t user_metadata_size;
+
+ private:
+  PDX_SERIALIZABLE_MEMBERS(ProducerQueueConfig, is_async, default_width,
+                           default_height, default_format, user_metadata_size);
+};
+
+class ProducerQueueConfigBuilder {
+ public:
+  // Build a ProducerQueueConfig object.
+  ProducerQueueConfig Build() {
+    return {is_async_, default_width_, default_height_, default_format_,
+            user_metadata_size_};
+  }
+
+  ProducerQueueConfigBuilder& SetIsAsync(bool is_async) {
+    is_async_ = is_async;
+    return *this;
+  }
+
+  ProducerQueueConfigBuilder& SetDefaultWidth(uint32_t width) {
+    default_width_ = width;
+    return *this;
+  }
+
+  ProducerQueueConfigBuilder& SetDefaultHeight(uint32_t height) {
+    default_height_ = height;
+    return *this;
+  }
+
+  ProducerQueueConfigBuilder& SetDefaultFormat(uint32_t format) {
+    default_format_ = format;
+    return *this;
+  }
+
+  template <typename Meta>
+  ProducerQueueConfigBuilder& SetMetadata() {
+    user_metadata_size_ = sizeof(Meta);
+    return *this;
+  }
+
+  ProducerQueueConfigBuilder& SetMetadataSize(size_t user_metadata_size) {
+    user_metadata_size_ = user_metadata_size;
+    return *this;
+  }
+
+ private:
+  bool is_async_{false};
+  uint32_t default_width_{1};
+  uint32_t default_height_{1};
+  uint32_t default_format_{1};  // PIXEL_FORMAT_RGBA_8888
+  size_t user_metadata_size_{0};
+};
+
+// Explicit specializations of ProducerQueueConfigBuilder::Build for void
+// metadata type.
+template <>
+inline ProducerQueueConfigBuilder&
+ProducerQueueConfigBuilder::SetMetadata<void>() {
+  user_metadata_size_ = 0;
+  return *this;
+}
+
 struct QueueInfo {
-  size_t meta_size_bytes;
+  ProducerQueueConfig producer_config;
   int id;
 
  private:
-  PDX_SERIALIZABLE_MEMBERS(QueueInfo, meta_size_bytes, id);
+  PDX_SERIALIZABLE_MEMBERS(QueueInfo, producer_config, id);
 };
 
 struct UsagePolicy {
-  uint64_t usage_set_mask;
-  uint64_t usage_clear_mask;
-  uint64_t usage_deny_set_mask;
-  uint64_t usage_deny_clear_mask;
+  uint64_t usage_set_mask{0};
+  uint64_t usage_clear_mask{0};
+  uint64_t usage_deny_set_mask{0};
+  uint64_t usage_deny_clear_mask{0};
 
  private:
   PDX_SERIALIZABLE_MEMBERS(UsagePolicy, usage_set_mask, usage_clear_mask,
@@ -166,27 +306,24 @@ struct BufferHubRPC {
   // Op codes.
   enum {
     kOpCreateBuffer = 0,
-    kOpCreatePersistentBuffer,
-    kOpGetPersistentBuffer,
     kOpGetBuffer,
     kOpNewConsumer,
-    kOpProducerMakePersistent,
-    kOpProducerRemovePersistence,
     kOpProducerPost,
     kOpProducerGain,
     kOpConsumerAcquire,
     kOpConsumerRelease,
-    kOpConsumerSetIgnore,
+    kOpConsumerBufferDetach,
     kOpCreateProducerQueue,
     kOpCreateConsumerQueue,
     kOpGetQueueInfo,
     kOpProducerQueueAllocateBuffers,
-    kOpProducerQueueDetachBuffer,
+    kOpProducerQueueInsertBuffer,
+    kOpProducerQueueRemoveBuffer,
     kOpConsumerQueueImportBuffers,
+    // TODO(b/77153033): Separate all those RPC operations into subclasses.
   };
 
   // Aliases.
-  using MetaData = pdx::rpc::BufferWrapper<std::uint8_t*>;
   using LocalChannelHandle = pdx::LocalChannelHandle;
   using LocalHandle = pdx::LocalHandle;
   using Void = pdx::rpc::Void;
@@ -194,42 +331,41 @@ struct BufferHubRPC {
   // Methods.
   PDX_REMOTE_METHOD(CreateBuffer, kOpCreateBuffer,
                     void(uint32_t width, uint32_t height, uint32_t format,
-                         uint64_t usage, size_t meta_size_bytes));
-  PDX_REMOTE_METHOD(CreatePersistentBuffer, kOpCreatePersistentBuffer,
-                    void(const std::string& name, int user_id, int group_id,
-                         uint32_t width, uint32_t height, uint32_t format,
-                         uint64_t usage, size_t meta_size_bytes));
-  PDX_REMOTE_METHOD(GetPersistentBuffer, kOpGetPersistentBuffer,
-                    void(const std::string& name));
+                         uint64_t usage, size_t user_metadata_size));
   PDX_REMOTE_METHOD(GetBuffer, kOpGetBuffer,
-                    NativeBufferHandle<LocalHandle>(Void));
+                    BufferDescription<LocalHandle>(Void));
   PDX_REMOTE_METHOD(NewConsumer, kOpNewConsumer, LocalChannelHandle(Void));
-  PDX_REMOTE_METHOD(ProducerMakePersistent, kOpProducerMakePersistent,
-                    void(const std::string& name, int user_id, int group_id));
-  PDX_REMOTE_METHOD(ProducerRemovePersistence, kOpProducerRemovePersistence,
-                    void(Void));
   PDX_REMOTE_METHOD(ProducerPost, kOpProducerPost,
-                    void(LocalFence acquire_fence, MetaData));
+                    void(LocalFence acquire_fence));
   PDX_REMOTE_METHOD(ProducerGain, kOpProducerGain, LocalFence(Void));
-  PDX_REMOTE_METHOD(ConsumerAcquire, kOpConsumerAcquire,
-                    std::pair<LocalFence, MetaData>(std::size_t metadata_size));
+  PDX_REMOTE_METHOD(ConsumerAcquire, kOpConsumerAcquire, LocalFence(Void));
   PDX_REMOTE_METHOD(ConsumerRelease, kOpConsumerRelease,
                     void(LocalFence release_fence));
-  PDX_REMOTE_METHOD(ConsumerSetIgnore, kOpConsumerSetIgnore, void(bool ignore));
+
+  // Detaches a ConsumerBuffer from an existing producer/consumer set. Can only
+  // be called when the consumer is the only consumer and it has exclusive
+  // access to the buffer (i.e. in the acquired'ed state). On the successful
+  // return of the IPC call, a new DetachedBufferChannel handle will be returned
+  // and all existing producer and consumer channels will be closed. Further
+  // IPCs towards those channels will return error.
+  PDX_REMOTE_METHOD(ConsumerBufferDetach, kOpConsumerBufferDetach,
+                    LocalChannelHandle(Void));
 
   // Buffer Queue Methods.
   PDX_REMOTE_METHOD(CreateProducerQueue, kOpCreateProducerQueue,
-                    QueueInfo(size_t meta_size_bytes,
+                    QueueInfo(const ProducerQueueConfig& producer_config,
                               const UsagePolicy& usage_policy));
   PDX_REMOTE_METHOD(CreateConsumerQueue, kOpCreateConsumerQueue,
-                    LocalChannelHandle(Void));
+                    LocalChannelHandle(bool silent_queue));
   PDX_REMOTE_METHOD(GetQueueInfo, kOpGetQueueInfo, QueueInfo(Void));
   PDX_REMOTE_METHOD(ProducerQueueAllocateBuffers,
                     kOpProducerQueueAllocateBuffers,
                     std::vector<std::pair<LocalChannelHandle, size_t>>(
                         uint32_t width, uint32_t height, uint32_t layer_count,
                         uint32_t format, uint64_t usage, size_t buffer_count));
-  PDX_REMOTE_METHOD(ProducerQueueDetachBuffer, kOpProducerQueueDetachBuffer,
+  PDX_REMOTE_METHOD(ProducerQueueInsertBuffer, kOpProducerQueueInsertBuffer,
+                    size_t(int buffer_cid));
+  PDX_REMOTE_METHOD(ProducerQueueRemoveBuffer, kOpProducerQueueRemoveBuffer,
                     void(size_t slot));
   PDX_REMOTE_METHOD(ConsumerQueueImportBuffers, kOpConsumerQueueImportBuffers,
                     std::vector<std::pair<LocalChannelHandle, size_t>>(Void));

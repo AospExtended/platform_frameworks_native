@@ -14,25 +14,36 @@
  * limitations under the License.
  */
 
+#define ATRACE_TAG ATRACE_TAG_GRAPHICS
+
 #include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 
+#include <dlfcn.h>
 #include <algorithm>
 #include <array>
-#include <dlfcn.h>
 #include <new>
 
 #include <log/log.h>
 
 #include <android/dlext.h>
+#include <android/hardware/configstore/1.0/ISurfaceFlingerConfigs.h>
+#include <configstore/Utils.h>
 #include <cutils/properties.h>
-#include <ui/GraphicsEnv.h>
+#include <graphicsenv/GraphicsEnv.h>
+#include <utils/Timers.h>
+#include <utils/Trace.h>
 #include <utils/Vector.h>
+
+#include "android-base/properties.h"
 
 #include "driver.h"
 #include "stubhal.h"
+
+using namespace android::hardware::configstore;
+using namespace android::hardware::configstore::V1_0;
 
 // TODO(b/37049319) Get this from a header once one exists
 extern "C" {
@@ -92,6 +103,8 @@ class CreateInfoWrapper {
     ~CreateInfoWrapper();
 
     VkResult Validate();
+    void DowngradeApiVersion();
+    void UpgradeDeviceCoreApiVersion(uint32_t api_version);
 
     const std::bitset<ProcHook::EXTENSION_COUNT>& GetHookExtensions() const;
     const std::bitset<ProcHook::EXTENSION_COUNT>& GetHalExtensions() const;
@@ -129,6 +142,8 @@ class CreateInfoWrapper {
         VkDeviceCreateInfo dev_info_;
     };
 
+    VkApplicationInfo application_info_;
+
     ExtensionFilter extension_filter_;
 
     std::bitset<ProcHook::EXTENSION_COUNT> hook_extensions_;
@@ -140,6 +155,8 @@ Hal Hal::hal_;
 void* LoadLibrary(const android_dlextinfo& dlextinfo,
                   const char* subname,
                   int subname_len) {
+    ATRACE_CALL();
+
     const char kLibFormat[] = "vulkan.%*s.so";
     char* name = static_cast<char*>(
         alloca(sizeof(kLibFormat) + static_cast<size_t>(subname_len)));
@@ -154,6 +171,8 @@ const std::array<const char*, 2> HAL_SUBNAME_KEY_PROPERTIES = {{
 
 int LoadDriver(android_namespace_t* library_namespace,
                const hwvulkan_module_t** module) {
+    ATRACE_CALL();
+
     const android_dlextinfo dlextinfo = {
         .flags = ANDROID_DLEXT_USE_NAMESPACE,
         .library_namespace = library_namespace,
@@ -188,20 +207,32 @@ int LoadDriver(android_namespace_t* library_namespace,
 }
 
 int LoadBuiltinDriver(const hwvulkan_module_t** module) {
+    ATRACE_CALL();
+
     auto ns = android_get_exported_namespace("sphal");
     if (!ns)
         return -ENOENT;
+    android::GraphicsEnv::getInstance().setDriverToLoad(
+        android::GraphicsEnv::Driver::VULKAN);
     return LoadDriver(ns, module);
 }
 
 int LoadUpdatedDriver(const hwvulkan_module_t** module) {
+    ATRACE_CALL();
+
     auto ns = android::GraphicsEnv::getInstance().getDriverNamespace();
     if (!ns)
         return -ENOENT;
+    android::GraphicsEnv::getInstance().setDriverToLoad(
+        android::GraphicsEnv::Driver::VULKAN_UPDATED);
     return LoadDriver(ns, module);
 }
 
 bool Hal::Open() {
+    ATRACE_CALL();
+
+    const nsecs_t openTime = systemTime();
+
     ALOG_ASSERT(!hal_.dev_, "OpenHAL called more than once");
 
     // Use a stub device unless we successfully open a real HAL device.
@@ -227,15 +258,22 @@ bool Hal::Open() {
         }
     }
     if (result != 0) {
+        android::GraphicsEnv::getInstance().setDriverLoaded(
+            android::GraphicsEnv::Api::API_VK, false, systemTime() - openTime);
         ALOGV("unable to load Vulkan HAL, using stub HAL (result=%d)", result);
         return true;
     }
 
+
     hwvulkan_device_t* device;
+    ATRACE_BEGIN("hwvulkan module open");
     result =
         module->common.methods->open(&module->common, HWVULKAN_DEVICE_0,
                                      reinterpret_cast<hw_device_t**>(&device));
+    ATRACE_END();
     if (result != 0) {
+        android::GraphicsEnv::getInstance().setDriverLoaded(
+            android::GraphicsEnv::Api::API_VK, false, systemTime() - openTime);
         // Any device with a Vulkan HAL should be able to open the device.
         ALOGE("failed to open Vulkan HAL device: %s (%d)", strerror(-result),
               result);
@@ -246,10 +284,15 @@ bool Hal::Open() {
 
     hal_.InitDebugReportIndex();
 
+    android::GraphicsEnv::getInstance().setDriverLoaded(
+        android::GraphicsEnv::Api::API_VK, true, systemTime() - openTime);
+
     return true;
 }
 
 bool Hal::InitDebugReportIndex() {
+    ATRACE_CALL();
+
     uint32_t count;
     if (dev_->EnumerateInstanceExtensionProperties(nullptr, &count, nullptr) !=
         VK_SUCCESS) {
@@ -291,8 +334,12 @@ CreateInfoWrapper::CreateInfoWrapper(const VkInstanceCreateInfo& create_info,
       physical_dev_(VK_NULL_HANDLE),
       instance_info_(create_info),
       extension_filter_() {
-    hook_extensions_.set(ProcHook::EXTENSION_CORE);
-    hal_extensions_.set(ProcHook::EXTENSION_CORE);
+    // instance core versions need to match the loader api version
+    for (uint32_t i = ProcHook::EXTENSION_CORE_1_0;
+         i != ProcHook::EXTENSION_COUNT; ++i) {
+        hook_extensions_.set(i);
+        hal_extensions_.set(i);
+    }
 }
 
 CreateInfoWrapper::CreateInfoWrapper(VkPhysicalDevice physical_dev,
@@ -303,8 +350,9 @@ CreateInfoWrapper::CreateInfoWrapper(VkPhysicalDevice physical_dev,
       physical_dev_(physical_dev),
       dev_info_(create_info),
       extension_filter_() {
-    hook_extensions_.set(ProcHook::EXTENSION_CORE);
-    hal_extensions_.set(ProcHook::EXTENSION_CORE);
+    // initialize with baseline core API version
+    hook_extensions_.set(ProcHook::EXTENSION_CORE_1_0);
+    hal_extensions_.set(ProcHook::EXTENSION_CORE_1_0);
 }
 
 CreateInfoWrapper::~CreateInfoWrapper() {
@@ -397,6 +445,12 @@ VkResult CreateInfoWrapper::SanitizeExtensions() {
     for (uint32_t i = 0; i < ext_count; i++)
         FilterExtension(ext_names[i]);
 
+    // Enable device extensions that contain physical-device commands, so that
+    // vkGetInstanceProcAddr will return those physical-device commands.
+    if (is_instance_) {
+        hook_extensions_.set(ProcHook::KHR_swapchain);
+    }
+
     ext_names = extension_filter_.names;
     ext_count = extension_filter_.name_count;
 
@@ -484,13 +538,38 @@ void CreateInfoWrapper::FilterExtension(const char* name) {
                 // both we and HAL can take part in
                 hook_extensions_.set(ext_bit);
                 break;
-            case ProcHook::EXTENSION_UNKNOWN:
             case ProcHook::KHR_get_physical_device_properties2:
-                // HAL's extensions
+            case ProcHook::EXTENSION_UNKNOWN:
+                // Extensions we don't need to do anything about at this level
                 break;
-            default:
-                ALOGW("Ignored invalid instance extension %s", name);
+
+            case ProcHook::KHR_bind_memory2:
+            case ProcHook::KHR_incremental_present:
+            case ProcHook::KHR_shared_presentable_image:
+            case ProcHook::KHR_swapchain:
+            case ProcHook::EXT_hdr_metadata:
+            case ProcHook::ANDROID_external_memory_android_hardware_buffer:
+            case ProcHook::ANDROID_native_buffer:
+            case ProcHook::GOOGLE_display_timing:
+            case ProcHook::EXTENSION_CORE_1_0:
+            case ProcHook::EXTENSION_CORE_1_1:
+            case ProcHook::EXTENSION_COUNT:
+                // Device and meta extensions. If we ever get here it's a bug in
+                // our code. But enumerating them lets us avoid having a default
+                // case, and default hides other bugs.
+                ALOGE(
+                    "CreateInfoWrapper::FilterExtension: invalid instance "
+                    "extension '%s'. FIX ME",
+                    name);
                 return;
+
+            // Don't use a default case. Without it, -Wswitch will tell us
+            // at compile time if someone adds a new ProcHook extension but
+            // doesn't handle it above. That's a real bug that has
+            // not-immediately-obvious effects.
+            //
+            // default:
+            //     break;
         }
     } else {
         switch (ext_bit) {
@@ -506,14 +585,40 @@ void CreateInfoWrapper::FilterExtension(const char* name) {
                 // return now as these extensions do not require HAL support
                 return;
             case ProcHook::EXT_hdr_metadata:
+            case ProcHook::KHR_bind_memory2:
                 hook_extensions_.set(ext_bit);
                 break;
+            case ProcHook::ANDROID_external_memory_android_hardware_buffer:
             case ProcHook::EXTENSION_UNKNOWN:
-                // HAL's extensions
+                // Extensions we don't need to do anything about at this level
                 break;
-            default:
-                ALOGW("Ignored invalid device extension %s", name);
+
+            case ProcHook::KHR_android_surface:
+            case ProcHook::KHR_get_physical_device_properties2:
+            case ProcHook::KHR_get_surface_capabilities2:
+            case ProcHook::KHR_surface:
+            case ProcHook::EXT_debug_report:
+            case ProcHook::EXT_swapchain_colorspace:
+            case ProcHook::ANDROID_native_buffer:
+            case ProcHook::EXTENSION_CORE_1_0:
+            case ProcHook::EXTENSION_CORE_1_1:
+            case ProcHook::EXTENSION_COUNT:
+                // Instance and meta extensions. If we ever get here it's a bug
+                // in our code. But enumerating them lets us avoid having a
+                // default case, and default hides other bugs.
+                ALOGE(
+                    "CreateInfoWrapper::FilterExtension: invalid device "
+                    "extension '%s'. FIX ME",
+                    name);
                 return;
+
+            // Don't use a default case. Without it, -Wswitch will tell us
+            // at compile time if someone adds a new ProcHook extension but
+            // doesn't handle it above. That's a real bug that has
+            // not-immediately-obvious effects.
+            //
+            // default:
+            //     break;
         }
     }
 
@@ -532,6 +637,37 @@ void CreateInfoWrapper::FilterExtension(const char* name) {
         }
 
         break;
+    }
+}
+
+void CreateInfoWrapper::DowngradeApiVersion() {
+    // If pApplicationInfo is NULL, apiVersion is assumed to be 1.0:
+    if (instance_info_.pApplicationInfo) {
+        application_info_ = *instance_info_.pApplicationInfo;
+        instance_info_.pApplicationInfo = &application_info_;
+        application_info_.apiVersion = VK_API_VERSION_1_0;
+    }
+}
+
+void CreateInfoWrapper::UpgradeDeviceCoreApiVersion(uint32_t api_version) {
+    ALOG_ASSERT(!is_instance_, "Device only API called by instance wrapper.");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wold-style-cast"
+    api_version ^= VK_VERSION_PATCH(api_version);
+#pragma clang diagnostic pop
+    // cap the API version to the loader supported highest version
+    if (api_version > VK_API_VERSION_1_1)
+        api_version = VK_API_VERSION_1_1;
+    switch (api_version) {
+        case VK_API_VERSION_1_1:
+            hook_extensions_.set(ProcHook::EXTENSION_CORE_1_1);
+            hal_extensions_.set(ProcHook::EXTENSION_CORE_1_1);
+            [[clang::fallthrough]];
+        case VK_API_VERSION_1_0:
+            break;
+        default:
+            ALOGD("Unknown upgrade API version[%u]", api_version);
+            break;
     }
 }
 
@@ -618,10 +754,6 @@ void FreeDeviceData(DeviceData* data, const VkAllocationCallbacks& allocator) {
 
 }  // anonymous namespace
 
-bool Debuggable() {
-    return (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) >= 0);
-}
-
 bool OpenHAL() {
     return Hal::Open();
 }
@@ -670,7 +802,7 @@ PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const char* pName) {
                        : nullptr;
             break;
         case ProcHook::DEVICE:
-            proc = (hook->extension == ProcHook::EXTENSION_CORE)
+            proc = (hook->extension == ProcHook::EXTENSION_CORE_1_0)
                        ? hook->proc
                        : hook->checked_proc;
             break;
@@ -749,8 +881,10 @@ VkResult EnumerateInstanceExtensionProperties(
         }
     }
 
+    ATRACE_BEGIN("driver.EnumerateInstanceExtensionProperties");
     VkResult result = Hal::Device().EnumerateInstanceExtensionProperties(
         pLayerName, pPropertyCount, pProperties);
+    ATRACE_END();
 
     if (!pLayerName && (result == VK_SUCCESS || result == VK_INCOMPLETE)) {
         int idx = Hal::Get().GetDebugReportIndex();
@@ -776,7 +910,8 @@ bool QueryPresentationProperties(
     const InstanceData& data = GetData(physicalDevice);
 
     // GPDP2 must be present and enabled on the instance.
-    if (!data.driver.GetPhysicalDeviceProperties2KHR)
+    if (!data.driver.GetPhysicalDeviceProperties2KHR &&
+        !data.driver.GetPhysicalDeviceProperties2)
         return false;
 
     // Request the android-specific presentation properties via GPDP2
@@ -794,8 +929,12 @@ bool QueryPresentationProperties(
     presentation_properties->pNext = nullptr;
     presentation_properties->sharedImage = VK_FALSE;
 
-    data.driver.GetPhysicalDeviceProperties2KHR(physicalDevice,
-                                                &properties);
+    if (data.driver.GetPhysicalDeviceProperties2KHR) {
+        data.driver.GetPhysicalDeviceProperties2KHR(physicalDevice,
+                                                    &properties);
+    } else {
+        data.driver.GetPhysicalDeviceProperties2(physicalDevice, &properties);
+    }
 
     return true;
 }
@@ -812,6 +951,14 @@ VkResult EnumerateDeviceExtensionProperties(
         VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME,
         VK_KHR_INCREMENTAL_PRESENT_SPEC_VERSION});
 
+    bool hdrBoardConfig =
+        getBool<ISurfaceFlingerConfigs, &ISurfaceFlingerConfigs::hasHDRDisplay>(
+            false);
+    if (hdrBoardConfig) {
+        loader_extensions.push_back({VK_EXT_HDR_METADATA_EXTENSION_NAME,
+                                     VK_EXT_HDR_METADATA_SPEC_VERSION});
+    }
+
     VkPhysicalDevicePresentationPropertiesANDROID presentation_properties;
     if (QueryPresentationProperties(physicalDevice, &presentation_properties) &&
         presentation_properties.sharedImage) {
@@ -822,9 +969,9 @@ VkResult EnumerateDeviceExtensionProperties(
 
     // conditionally add VK_GOOGLE_display_timing if present timestamps are
     // supported by the driver:
-    char timestamp_property[PROPERTY_VALUE_MAX];
-    property_get("service.sf.present_timestamp", timestamp_property, "1");
-    if (strcmp(timestamp_property, "1") == 0) {
+    const std::string timestamp_property("service.sf.present_timestamp");
+    android::base::WaitForPropertyCreation(timestamp_property);
+    if (android::base::GetBoolProperty(timestamp_property, true)) {
         loader_extensions.push_back({
                 VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
                 VK_GOOGLE_DISPLAY_TIMING_SPEC_VERSION});
@@ -846,8 +993,10 @@ VkResult EnumerateDeviceExtensionProperties(
         *pPropertyCount -= count;
     }
 
+    ATRACE_BEGIN("driver.EnumerateDeviceExtensionProperties");
     VkResult result = data.driver.EnumerateDeviceExtensionProperties(
         physicalDevice, pLayerName, pPropertyCount, pProperties);
+    ATRACE_END();
 
     if (pProperties) {
         // map VK_ANDROID_native_buffer to VK_KHR_swapchain
@@ -860,7 +1009,12 @@ VkResult EnumerateDeviceExtensionProperties(
 
             memcpy(prop.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                    sizeof(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
-            prop.specVersion = VK_KHR_SWAPCHAIN_SPEC_VERSION;
+
+            if (prop.specVersion >= 8) {
+                prop.specVersion = VK_KHR_SWAPCHAIN_SPEC_VERSION;
+            } else {
+                prop.specVersion = 68;
+            }
         }
     }
 
@@ -878,35 +1032,57 @@ VkResult CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks& data_allocator =
         (pAllocator) ? *pAllocator : GetDefaultAllocator();
 
-    if (pCreateInfo->pApplicationInfo &&
-        pCreateInfo->pApplicationInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wold-style-cast"
-        ALOGI(
-            "Requested Vulkan instance version %d.%d is greater than max "
-            "supported version (1.0)",
-            VK_VERSION_MAJOR(pCreateInfo->pApplicationInfo->apiVersion),
-            VK_VERSION_MINOR(pCreateInfo->pApplicationInfo->apiVersion));
-#pragma clang diagnostic pop
-        return VK_ERROR_INCOMPATIBLE_DRIVER;
-    }
-
     CreateInfoWrapper wrapper(*pCreateInfo, data_allocator);
     VkResult result = wrapper.Validate();
     if (result != VK_SUCCESS)
         return result;
 
+    ATRACE_BEGIN("AllocateInstanceData");
     InstanceData* data = AllocateInstanceData(data_allocator);
+    ATRACE_END();
     if (!data)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     data->hook_extensions |= wrapper.GetHookExtensions();
 
+    ATRACE_BEGIN("autoDowngradeApiVersion");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wold-style-cast"
+    uint32_t api_version = ((pCreateInfo->pApplicationInfo)
+                                ? pCreateInfo->pApplicationInfo->apiVersion
+                                : VK_API_VERSION_1_0);
+    uint32_t api_major_version = VK_VERSION_MAJOR(api_version);
+    uint32_t api_minor_version = VK_VERSION_MINOR(api_version);
+    uint32_t icd_api_version;
+    PFN_vkEnumerateInstanceVersion pfn_enumerate_instance_version =
+        reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            Hal::Device().GetInstanceProcAddr(nullptr,
+                                              "vkEnumerateInstanceVersion"));
+    if (!pfn_enumerate_instance_version) {
+        icd_api_version = VK_API_VERSION_1_0;
+    } else {
+        ATRACE_BEGIN("pfn_enumerate_instance_version");
+        result = (*pfn_enumerate_instance_version)(&icd_api_version);
+        ATRACE_END();
+    }
+    uint32_t icd_api_major_version = VK_VERSION_MAJOR(icd_api_version);
+    uint32_t icd_api_minor_version = VK_VERSION_MINOR(icd_api_version);
+
+    if ((icd_api_major_version == 1) && (icd_api_minor_version == 0) &&
+        ((api_major_version > 1) || (api_minor_version > 0))) {
+        api_version = VK_API_VERSION_1_0;
+        wrapper.DowngradeApiVersion();
+    }
+#pragma clang diagnostic pop
+    ATRACE_END();
+
     // call into the driver
     VkInstance instance;
+    ATRACE_BEGIN("driver.CreateInstance");
     result = Hal::Device().CreateInstance(
         static_cast<const VkInstanceCreateInfo*>(wrapper), pAllocator,
         &instance);
+    ATRACE_END();
     if (result != VK_SUCCESS) {
         FreeInstanceData(data, data_allocator);
         return result;
@@ -967,18 +1143,29 @@ VkResult CreateDevice(VkPhysicalDevice physicalDevice,
     if (result != VK_SUCCESS)
         return result;
 
+    ATRACE_BEGIN("AllocateDeviceData");
     DeviceData* data = AllocateDeviceData(data_allocator,
                                           instance_data.debug_report_callbacks);
+    ATRACE_END();
     if (!data)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+    VkPhysicalDeviceProperties properties;
+    ATRACE_BEGIN("driver.GetPhysicalDeviceProperties");
+    instance_data.driver.GetPhysicalDeviceProperties(physicalDevice,
+                                                     &properties);
+    ATRACE_END();
+
+    wrapper.UpgradeDeviceCoreApiVersion(properties.apiVersion);
     data->hook_extensions |= wrapper.GetHookExtensions();
 
     // call into the driver
     VkDevice dev;
+    ATRACE_BEGIN("driver.CreateDevice");
     result = instance_data.driver.CreateDevice(
         physicalDevice, static_cast<const VkDeviceCreateInfo*>(wrapper),
         pAllocator, &dev);
+    ATRACE_END();
     if (result != VK_SUCCESS) {
         FreeDeviceData(data, data_allocator);
         return result;
@@ -1014,9 +1201,11 @@ VkResult CreateDevice(VkPhysicalDevice physicalDevice,
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     }
 
-    VkPhysicalDeviceProperties properties;
-    instance_data.driver.GetPhysicalDeviceProperties(physicalDevice,
-                                                     &properties);
+    if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+        // Log that the app is hitting software Vulkan implementation
+        android::GraphicsEnv::getInstance().setTargetStats(
+            android::GraphicsEnv::Stats::CPU_VULKAN_IN_USE);
+    }
 
     data->driver_device = dev;
     data->driver_version = properties.driverVersion;
@@ -1042,6 +1231,8 @@ void DestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) {
 VkResult EnumeratePhysicalDevices(VkInstance instance,
                                   uint32_t* pPhysicalDeviceCount,
                                   VkPhysicalDevice* pPhysicalDevices) {
+    ATRACE_CALL();
+
     const auto& data = GetData(instance);
 
     VkResult result = data.driver.EnumeratePhysicalDevices(
@@ -1054,20 +1245,97 @@ VkResult EnumeratePhysicalDevices(VkInstance instance,
     return result;
 }
 
+VkResult EnumeratePhysicalDeviceGroups(
+    VkInstance instance,
+    uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties) {
+    ATRACE_CALL();
+
+    VkResult result = VK_SUCCESS;
+    const auto& data = GetData(instance);
+
+    if (!data.driver.EnumeratePhysicalDeviceGroups) {
+        uint32_t device_count = 0;
+        result = EnumeratePhysicalDevices(instance, &device_count, nullptr);
+        if (result < 0)
+            return result;
+
+        if (!pPhysicalDeviceGroupProperties) {
+            *pPhysicalDeviceGroupCount = device_count;
+            return result;
+        }
+
+        if (!device_count) {
+            *pPhysicalDeviceGroupCount = 0;
+            return result;
+        }
+        device_count = std::min(device_count, *pPhysicalDeviceGroupCount);
+        if (!device_count)
+            return VK_INCOMPLETE;
+
+        android::Vector<VkPhysicalDevice> devices;
+        devices.resize(device_count);
+        *pPhysicalDeviceGroupCount = device_count;
+        result = EnumeratePhysicalDevices(instance, &device_count,
+                                          devices.editArray());
+        if (result < 0)
+            return result;
+
+        for (uint32_t i = 0; i < device_count; ++i) {
+            pPhysicalDeviceGroupProperties[i].physicalDeviceCount = 1;
+            pPhysicalDeviceGroupProperties[i].physicalDevices[0] = devices[i];
+            pPhysicalDeviceGroupProperties[i].subsetAllocation = 0;
+        }
+    } else {
+        result = data.driver.EnumeratePhysicalDeviceGroups(
+            instance, pPhysicalDeviceGroupCount,
+            pPhysicalDeviceGroupProperties);
+        if ((result == VK_SUCCESS || result == VK_INCOMPLETE) &&
+            *pPhysicalDeviceGroupCount && pPhysicalDeviceGroupProperties) {
+            for (uint32_t i = 0; i < *pPhysicalDeviceGroupCount; i++) {
+                for (uint32_t j = 0;
+                     j < pPhysicalDeviceGroupProperties[i].physicalDeviceCount;
+                     j++) {
+                    SetData(
+                        pPhysicalDeviceGroupProperties[i].physicalDevices[j],
+                        data);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 void GetDeviceQueue(VkDevice device,
                     uint32_t queueFamilyIndex,
                     uint32_t queueIndex,
                     VkQueue* pQueue) {
+    ATRACE_CALL();
+
     const auto& data = GetData(device);
 
     data.driver.GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
     SetData(*pQueue, data);
 }
 
+void GetDeviceQueue2(VkDevice device,
+                     const VkDeviceQueueInfo2* pQueueInfo,
+                     VkQueue* pQueue) {
+    ATRACE_CALL();
+
+    const auto& data = GetData(device);
+
+    data.driver.GetDeviceQueue2(device, pQueueInfo, pQueue);
+    if (*pQueue != VK_NULL_HANDLE) SetData(*pQueue, data);
+}
+
 VKAPI_ATTR VkResult
 AllocateCommandBuffers(VkDevice device,
                        const VkCommandBufferAllocateInfo* pAllocateInfo,
                        VkCommandBuffer* pCommandBuffers) {
+    ATRACE_CALL();
+
     const auto& data = GetData(device);
 
     VkResult result = data.driver.AllocateCommandBuffers(device, pAllocateInfo,

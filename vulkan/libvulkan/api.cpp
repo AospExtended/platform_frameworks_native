@@ -21,6 +21,8 @@
 // There are a few of them requiring manual code for things such as layer
 // discovery or chaining.  They call into functions defined in this file.
 
+#define ATRACE_TAG ATRACE_TAG_GRAPHICS
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,13 +31,17 @@
 #include <new>
 #include <utility>
 
+#include <android-base/strings.h>
 #include <cutils/properties.h>
 #include <log/log.h>
+#include <utils/Trace.h>
 
 #include <vulkan/vk_layer_interface.h>
+#include <graphicsenv/GraphicsEnv.h>
 #include "api.h"
 #include "driver.h"
 #include "layers_extensions.h"
+
 
 namespace vulkan {
 namespace api {
@@ -118,18 +124,36 @@ class OverrideLayerNames {
     };
 
     void AddImplicitLayers() {
-        if (!is_instance_ || !driver::Debuggable())
+        if (!is_instance_)
             return;
 
-        ParseDebugVulkanLayers();
-        property_list(ParseDebugVulkanLayer, this);
+        GetLayersFromSettings();
 
-        // sort by priorities
-        auto& arr = implicit_layers_;
-        std::sort(arr.elements, arr.elements + arr.count,
-                  [](const ImplicitLayer& a, const ImplicitLayer& b) {
-                      return (a.priority < b.priority);
-                  });
+        // If no layers specified via Settings, check legacy properties
+        if (implicit_layers_.count <= 0) {
+            ParseDebugVulkanLayers();
+            property_list(ParseDebugVulkanLayer, this);
+
+            // sort by priorities
+            auto& arr = implicit_layers_;
+            std::sort(arr.elements, arr.elements + arr.count,
+                      [](const ImplicitLayer& a, const ImplicitLayer& b) {
+                          return (a.priority < b.priority);
+                      });
+        }
+    }
+
+    void GetLayersFromSettings() {
+        // These will only be available if conditions are met in GraphicsEnvironemnt
+        // gpu_debug_layers = layer1:layer2:layerN
+        const std::string layers = android::GraphicsEnv::getInstance().getDebugLayers();
+        if (!layers.empty()) {
+            ALOGV("Debug layer list: %s", layers.c_str());
+            std::vector<std::string> paths = android::base::Split(layers, ":");
+            for (uint32_t i = 0; i < paths.size(); i++) {
+                AddImplicitLayer(int(i), paths[i].c_str(), paths[i].length());
+            }
+        }
     }
 
     void ParseDebugVulkanLayers() {
@@ -346,7 +370,8 @@ class OverrideExtensionNames {
 
    private:
     bool EnableDebugCallback() const {
-        return (is_instance_ && driver::Debuggable() &&
+        return (is_instance_ &&
+                android::GraphicsEnv::getInstance().isDebuggable() &&
                 property_get_bool("debug.vulkan.enable_callback", false));
     }
 
@@ -495,7 +520,11 @@ LayerChain::LayerChain(bool is_instance,
       get_device_proc_addr_(nullptr),
       driver_extensions_(nullptr),
       driver_extension_count_(0) {
-    enabled_extensions_.set(driver::ProcHook::EXTENSION_CORE);
+    // advertise the loader supported core Vulkan API version at vulkan::api
+    for (uint32_t i = driver::ProcHook::EXTENSION_CORE_1_0;
+         i != driver::ProcHook::EXTENSION_COUNT; ++i) {
+        enabled_extensions_.set(i);
+    }
 }
 
 LayerChain::~LayerChain() {
@@ -1155,6 +1184,8 @@ bool EnsureInitialized() {
 VkResult CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
                         const VkAllocationCallbacks* pAllocator,
                         VkInstance* pInstance) {
+    ATRACE_CALL();
+
     if (!EnsureInitialized())
         return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1163,6 +1194,8 @@ VkResult CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
 
 void DestroyInstance(VkInstance instance,
                      const VkAllocationCallbacks* pAllocator) {
+    ATRACE_CALL();
+
     if (instance != VK_NULL_HANDLE)
         LayerChain::DestroyInstance(instance, pAllocator);
 }
@@ -1171,17 +1204,23 @@ VkResult CreateDevice(VkPhysicalDevice physicalDevice,
                       const VkDeviceCreateInfo* pCreateInfo,
                       const VkAllocationCallbacks* pAllocator,
                       VkDevice* pDevice) {
+    ATRACE_CALL();
+
     return LayerChain::CreateDevice(physicalDevice, pCreateInfo, pAllocator,
                                     pDevice);
 }
 
 void DestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) {
+    ATRACE_CALL();
+
     if (device != VK_NULL_HANDLE)
         LayerChain::DestroyDevice(device, pAllocator);
 }
 
 VkResult EnumerateInstanceLayerProperties(uint32_t* pPropertyCount,
                                           VkLayerProperties* pProperties) {
+    ATRACE_CALL();
+
     if (!EnsureInitialized())
         return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1204,6 +1243,8 @@ VkResult EnumerateInstanceExtensionProperties(
     const char* pLayerName,
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties) {
+    ATRACE_CALL();
+
     if (!EnsureInitialized())
         return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -1232,6 +1273,8 @@ VkResult EnumerateInstanceExtensionProperties(
 VkResult EnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice,
                                         uint32_t* pPropertyCount,
                                         VkLayerProperties* pProperties) {
+    ATRACE_CALL();
+
     uint32_t count;
     const LayerChain::ActiveLayer* layers =
         LayerChain::GetActiveLayers(physicalDevice, count);
@@ -1254,6 +1297,8 @@ VkResult EnumerateDeviceExtensionProperties(
     const char* pLayerName,
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties) {
+    ATRACE_CALL();
+
     if (pLayerName) {
         // EnumerateDeviceLayerProperties enumerates active layers for
         // backward compatibility.  The extension query here should work for
@@ -1278,6 +1323,13 @@ VkResult EnumerateDeviceExtensionProperties(
     const InstanceData& data = GetData(physicalDevice);
     return data.dispatch.EnumerateDeviceExtensionProperties(
         physicalDevice, nullptr, pPropertyCount, pProperties);
+}
+
+VkResult EnumerateInstanceVersion(uint32_t* pApiVersion) {
+    ATRACE_CALL();
+
+    *pApiVersion = VK_API_VERSION_1_1;
+    return VK_SUCCESS;
 }
 
 }  // namespace api

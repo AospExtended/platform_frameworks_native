@@ -356,10 +356,6 @@ int createTextureSurface(ogles_context_t* c,
         GLenum format, GLenum type, GLsizei width, GLsizei height,
         GLenum compressedFormat = 0)
 {
-    // find out which texture is bound to the current unit
-    const int active = c->textures.active;
-    const GLuint name = c->textures.tmu[active].name;
-
     // convert the pixelformat to one we can handle
     const int32_t formatIdx = convertGLPixelFormat(format, type);
     if (formatIdx == 0) { // we don't know what to do with this
@@ -405,14 +401,14 @@ static GLsizei dataSizePalette4(int numLevels, int width, int height, int format
     switch (format) {
     case GL_PALETTE4_RGB8_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_RGB8_OES:
         entrySize = 3;
         break;
 
     case GL_PALETTE4_RGBA8_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_RGBA8_OES:
         entrySize = 4;
         break;
@@ -421,7 +417,7 @@ static GLsizei dataSizePalette4(int numLevels, int width, int height, int format
     case GL_PALETTE4_RGBA4_OES:
     case GL_PALETTE4_RGB5_A1_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_R5_G6_B5_OES:
     case GL_PALETTE8_RGBA4_OES:
     case GL_PALETTE8_RGB5_A1_OES:
@@ -450,14 +446,14 @@ static void decodePalette4(const GLvoid *data, int level, int width, int height,
     switch (format) {
     case GL_PALETTE4_RGB8_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_RGB8_OES:
         entrySize = 3;
         break;
 
     case GL_PALETTE4_RGBA8_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_RGBA8_OES:
         entrySize = 4;
         break;
@@ -466,7 +462,7 @@ static void decodePalette4(const GLvoid *data, int level, int width, int height,
     case GL_PALETTE4_RGBA4_OES:
     case GL_PALETTE4_RGB5_A1_OES:
         indexBits = 4;
-        /* FALLTHROUGH */
+        [[fallthrough]];
     case GL_PALETTE8_R5_G6_B5_OES:
     case GL_PALETTE8_RGBA4_OES:
     case GL_PALETTE8_RGB5_A1_OES:
@@ -1192,7 +1188,6 @@ void glTexImage2D(
         const GGLFormat& pixelFormat(c->rasterizer.formats[formatIdx]);
         const int32_t align = c->textures.unpackAlignment-1;
         const int32_t bpr = ((width * pixelFormat.size) + align) & ~align;
-        const size_t size = bpr * height;
         const int32_t stride = bpr / pixelFormat.size;
 
         GGLSurface userSurface;
@@ -1276,7 +1271,6 @@ void glTexSubImage2D(
     const GGLFormat& pixelFormat(c->rasterizer.formats[formatIdx]);
     const int32_t align = c->textures.unpackAlignment-1;
     const int32_t bpr = ((width * pixelFormat.size) + align) & ~align;
-    const size_t size = bpr * height;
     const int32_t stride = bpr / pixelFormat.size;
     GGLSurface userSurface;
     userSurface.version = sizeof(userSurface);

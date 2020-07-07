@@ -27,13 +27,12 @@
 #include <utils/String8.h>
 #include <log/log.h>
 
-#include <EGL/egl.h>
-
 #include <hardware/hardware.h>
 #include <gui/BufferItem.h>
 #include <gui/BufferQueue.h>
 #include <gui/Surface.h>
 
+#include <ui/DebugUtils.h>
 #include <ui/GraphicBuffer.h>
 #include <ui/Rect.h>
 
@@ -45,47 +44,41 @@
 namespace android {
 // ----------------------------------------------------------------------------
 
+using ui::Dataspace;
+
 /*
  * This implements the (main) framebuffer management. This class is used
  * mostly by SurfaceFlinger, but also by command line GL application.
  *
  */
 
-FramebufferSurface::FramebufferSurface(HWComposer& hwc, int disp,
-        const sp<IGraphicBufferConsumer>& consumer) :
-    ConsumerBase(consumer),
-    mDisplayType(disp),
-    mCurrentBufferSlot(-1),
-    mCurrentBuffer(),
-    mCurrentFence(Fence::NO_FENCE),
-#ifdef USE_HWC2
-    mHwc(hwc),
-    mHasPendingRelease(false),
-    mPreviousBufferSlot(BufferQueue::INVALID_BUFFER_SLOT),
-    mPreviousBuffer()
-#else
-    mHwc(hwc)
-#endif
-{
-#ifdef USE_HWC2
-    ALOGV("Creating for display %d", disp);
-#endif
+FramebufferSurface::FramebufferSurface(HWComposer& hwc, DisplayId displayId,
+                                       const sp<IGraphicBufferConsumer>& consumer)
+      : ConsumerBase(consumer),
+        mDisplayId(displayId),
+        mCurrentBufferSlot(-1),
+        mCurrentBuffer(),
+        mCurrentFence(Fence::NO_FENCE),
+        mHwc(hwc),
+        mHasPendingRelease(false),
+        mPreviousBufferSlot(BufferQueue::INVALID_BUFFER_SLOT),
+        mPreviousBuffer() {
+    ALOGV("Creating for display %s", to_string(displayId).c_str());
 
     mName = "FramebufferSurface";
     mConsumer->setConsumerName(mName);
     mConsumer->setConsumerUsageBits(GRALLOC_USAGE_HW_FB |
                                        GRALLOC_USAGE_HW_RENDER |
                                        GRALLOC_USAGE_HW_COMPOSER);
-#ifdef USE_HWC2
-    const auto& activeConfig = mHwc.getActiveConfig(disp);
+    const auto& activeConfig = mHwc.getActiveConfig(displayId);
     mConsumer->setDefaultBufferSize(activeConfig->getWidth(),
             activeConfig->getHeight());
-#else
-    mConsumer->setDefaultBufferFormat(mHwc.getFormat(disp));
-    mConsumer->setDefaultBufferSize(mHwc.getWidth(disp), mHwc.getHeight(disp));
-#endif
     mConsumer->setMaxAcquiredBufferCount(
             SurfaceFlinger::maxFrameBufferAcquiredBuffers - 1);
+}
+
+void FramebufferSurface::resizeBuffers(const uint32_t width, const uint32_t height) {
+    mConsumer->setDefaultBufferSize(width, height);
 }
 
 status_t FramebufferSurface::beginFrame(bool /*mustRecompose*/) {
@@ -97,49 +90,28 @@ status_t FramebufferSurface::prepareFrame(CompositionType /*compositionType*/) {
 }
 
 status_t FramebufferSurface::advanceFrame() {
-#ifdef USE_HWC2
     uint32_t slot = 0;
     sp<GraphicBuffer> buf;
     sp<Fence> acquireFence(Fence::NO_FENCE);
-    android_dataspace_t dataspace = HAL_DATASPACE_UNKNOWN;
+    Dataspace dataspace = Dataspace::UNKNOWN;
     status_t result = nextBuffer(slot, buf, acquireFence, dataspace);
+    mDataSpace = dataspace;
     if (result != NO_ERROR) {
         ALOGE("error latching next FramebufferSurface buffer: %s (%d)",
                 strerror(-result), result);
-        return result;
-    }
-    result = mHwc.setClientTarget(mDisplayType, slot,
-            acquireFence, buf, dataspace);
-    if (result != NO_ERROR) {
-        ALOGE("error posting framebuffer: %d", result);
     }
     return result;
-#else
-    // Once we remove FB HAL support, we can call nextBuffer() from here
-    // instead of using onFrameAvailable(). No real benefit, except it'll be
-    // more like VirtualDisplaySurface.
-    return NO_ERROR;
-#endif
 }
 
-#ifdef USE_HWC2
 status_t FramebufferSurface::nextBuffer(uint32_t& outSlot,
         sp<GraphicBuffer>& outBuffer, sp<Fence>& outFence,
-        android_dataspace_t& outDataspace) {
-#else
-status_t FramebufferSurface::nextBuffer(sp<GraphicBuffer>& outBuffer, sp<Fence>& outFence) {
-#endif
+        Dataspace& outDataspace) {
     Mutex::Autolock lock(mMutex);
 
     BufferItem item;
     status_t err = acquireBufferLocked(&item, 0);
     if (err == BufferQueue::NO_BUFFER_AVAILABLE) {
-#ifdef USE_HWC2
-        mHwcBufferCache.getHwcBuffer(mCurrentBufferSlot, mCurrentBuffer,
-                &outSlot, &outBuffer);
-#else
-        outBuffer = mCurrentBuffer;
-#endif
+        mHwcBufferCache.getHwcBuffer(mCurrentBufferSlot, mCurrentBuffer, &outSlot, &outBuffer);
         return NO_ERROR;
     } else if (err != NO_ERROR) {
         ALOGE("error acquiring buffer: %s (%d)", strerror(-err), err);
@@ -156,52 +128,25 @@ status_t FramebufferSurface::nextBuffer(sp<GraphicBuffer>& outBuffer, sp<Fence>&
     // had released the old buffer first.
     if (mCurrentBufferSlot != BufferQueue::INVALID_BUFFER_SLOT &&
         item.mSlot != mCurrentBufferSlot) {
-#ifdef USE_HWC2
         mHasPendingRelease = true;
         mPreviousBufferSlot = mCurrentBufferSlot;
         mPreviousBuffer = mCurrentBuffer;
-#else
-        // Release the previous buffer.
-        err = releaseBufferLocked(mCurrentBufferSlot, mCurrentBuffer,
-                EGL_NO_DISPLAY, EGL_NO_SYNC_KHR);
-        if (err < NO_ERROR) {
-            ALOGE("error releasing buffer: %s (%d)", strerror(-err), err);
-            return err;
-        }
-#endif
     }
     mCurrentBufferSlot = item.mSlot;
     mCurrentBuffer = mSlots[mCurrentBufferSlot].mGraphicBuffer;
     mCurrentFence = item.mFence;
 
     outFence = item.mFence;
-#ifdef USE_HWC2
-    mHwcBufferCache.getHwcBuffer(mCurrentBufferSlot, mCurrentBuffer,
-            &outSlot, &outBuffer);
-    outDataspace = item.mDataSpace;
-#else
-    outBuffer = mCurrentBuffer;
-#endif
+    mHwcBufferCache.getHwcBuffer(mCurrentBufferSlot, mCurrentBuffer, &outSlot, &outBuffer);
+    outDataspace = static_cast<Dataspace>(item.mDataSpace);
+    status_t result = mHwc.setClientTarget(mDisplayId, outSlot, outFence, outBuffer, outDataspace);
+    if (result != NO_ERROR) {
+        ALOGE("error posting framebuffer: %d", result);
+        return result;
+    }
+
     return NO_ERROR;
 }
-
-#ifndef USE_HWC2
-// Overrides ConsumerBase::onFrameAvailable(), does not call base class impl.
-void FramebufferSurface::onFrameAvailable(const BufferItem& /* item */) {
-    sp<GraphicBuffer> buf;
-    sp<Fence> acquireFence;
-    status_t err = nextBuffer(buf, acquireFence);
-    if (err != NO_ERROR) {
-        ALOGE("error latching nnext FramebufferSurface buffer: %s (%d)",
-                strerror(-err), err);
-        return;
-    }
-    err = mHwc.fbPost(mDisplayType, acquireFence, buf);
-    if (err != NO_ERROR) {
-        ALOGE("error posting framebuffer: %d", err);
-    }
-}
-#endif
 
 void FramebufferSurface::freeBufferLocked(int slotIndex) {
     ConsumerBase::freeBufferLocked(slotIndex);
@@ -211,51 +156,33 @@ void FramebufferSurface::freeBufferLocked(int slotIndex) {
 }
 
 void FramebufferSurface::onFrameCommitted() {
-#ifdef USE_HWC2
     if (mHasPendingRelease) {
-        sp<Fence> fence = mHwc.getPresentFence(mDisplayType);
+        sp<Fence> fence = mHwc.getPresentFence(mDisplayId);
         if (fence->isValid()) {
             status_t result = addReleaseFence(mPreviousBufferSlot,
                     mPreviousBuffer, fence);
             ALOGE_IF(result != NO_ERROR, "onFrameCommitted: failed to add the"
                     " fence: %s (%d)", strerror(-result), result);
         }
-        status_t result = releaseBufferLocked(mPreviousBufferSlot,
-                mPreviousBuffer, EGL_NO_DISPLAY, EGL_NO_SYNC_KHR);
+        status_t result = releaseBufferLocked(mPreviousBufferSlot, mPreviousBuffer);
         ALOGE_IF(result != NO_ERROR, "onFrameCommitted: error releasing buffer:"
                 " %s (%d)", strerror(-result), result);
 
         mPreviousBuffer.clear();
         mHasPendingRelease = false;
     }
-#else
-    sp<Fence> fence = mHwc.getAndResetReleaseFence(mDisplayType);
-    if (fence->isValid() &&
-            mCurrentBufferSlot != BufferQueue::INVALID_BUFFER_SLOT) {
-        status_t err = addReleaseFence(mCurrentBufferSlot,
-                mCurrentBuffer, fence);
-        ALOGE_IF(err, "setReleaseFenceFd: failed to add the fence: %s (%d)",
-                strerror(-err), err);
-    }
-#endif
 }
-
-#ifndef USE_HWC2
-status_t FramebufferSurface::compositionComplete()
-{
-    return mHwc.fbCompositionComplete();
-}
-#endif
 
 void FramebufferSurface::dumpAsString(String8& result) const {
-    ConsumerBase::dumpState(result);
+    Mutex::Autolock lock(mMutex);
+    result.appendFormat("  FramebufferSurface: dataspace: %s(%d)\n",
+                        dataspaceDetails(static_cast<android_dataspace>(mDataSpace)).c_str(),
+                        mDataSpace);
+    ConsumerBase::dumpLocked(result, "   ");
 }
 
 void FramebufferSurface::dumpLocked(String8& result, const char* prefix) const
 {
-#ifndef USE_HWC2
-    mHwc.fbDump(result);
-#endif
     ConsumerBase::dumpLocked(result, prefix);
 }
 

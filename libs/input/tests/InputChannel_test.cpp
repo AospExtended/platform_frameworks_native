@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <array>
+
 #include "TestHelpers.h"
 
 #include <unistd.h>
@@ -41,9 +43,9 @@ TEST_F(InputChannelTest, ConstructorAndDestructor_TakesOwnershipOfFileDescriptor
     // of a pipe and to check for EPIPE on the other end after the channel is destroyed.
     Pipe pipe;
 
-    sp<InputChannel> inputChannel = new InputChannel(String8("channel name"), pipe.sendFd);
+    sp<InputChannel> inputChannel = new InputChannel("channel name", pipe.sendFd);
 
-    EXPECT_STREQ("channel name", inputChannel->getName().string())
+    EXPECT_STREQ("channel name", inputChannel->getName().c_str())
             << "channel should have provided name";
     EXPECT_EQ(pipe.sendFd, inputChannel->getFd())
             << "channel should have provided fd";
@@ -60,16 +62,16 @@ TEST_F(InputChannelTest, ConstructorAndDestructor_TakesOwnershipOfFileDescriptor
 TEST_F(InputChannelTest, OpenInputChannelPair_ReturnsAPairOfConnectedChannels) {
     sp<InputChannel> serverChannel, clientChannel;
 
-    status_t result = InputChannel::openInputChannelPair(String8("channel name"),
+    status_t result = InputChannel::openInputChannelPair("channel name",
             serverChannel, clientChannel);
 
     ASSERT_EQ(OK, result)
             << "should have successfully opened a channel pair";
 
     // Name
-    EXPECT_STREQ("channel name (server)", serverChannel->getName().string())
+    EXPECT_STREQ("channel name (server)", serverChannel->getName().c_str())
             << "server channel should have suffixed name";
-    EXPECT_STREQ("channel name (client)", clientChannel->getName().string())
+    EXPECT_STREQ("channel name (client)", clientChannel->getName().c_str())
             << "client channel should have suffixed name";
 
     // Server->Client communication
@@ -111,7 +113,7 @@ TEST_F(InputChannelTest, OpenInputChannelPair_ReturnsAPairOfConnectedChannels) {
 TEST_F(InputChannelTest, ReceiveSignal_WhenNoSignalPresent_ReturnsAnError) {
     sp<InputChannel> serverChannel, clientChannel;
 
-    status_t result = InputChannel::openInputChannelPair(String8("channel name"),
+    status_t result = InputChannel::openInputChannelPair("channel name",
             serverChannel, clientChannel);
 
     ASSERT_EQ(OK, result)
@@ -125,7 +127,7 @@ TEST_F(InputChannelTest, ReceiveSignal_WhenNoSignalPresent_ReturnsAnError) {
 TEST_F(InputChannelTest, ReceiveSignal_WhenPeerClosed_ReturnsAnError) {
     sp<InputChannel> serverChannel, clientChannel;
 
-    status_t result = InputChannel::openInputChannelPair(String8("channel name"),
+    status_t result = InputChannel::openInputChannelPair("channel name",
             serverChannel, clientChannel);
 
     ASSERT_EQ(OK, result)
@@ -141,7 +143,7 @@ TEST_F(InputChannelTest, ReceiveSignal_WhenPeerClosed_ReturnsAnError) {
 TEST_F(InputChannelTest, SendSignal_WhenPeerClosed_ReturnsAnError) {
     sp<InputChannel> serverChannel, clientChannel;
 
-    status_t result = InputChannel::openInputChannelPair(String8("channel name"),
+    status_t result = InputChannel::openInputChannelPair("channel name",
             serverChannel, clientChannel);
 
     ASSERT_EQ(OK, result)
@@ -153,6 +155,38 @@ TEST_F(InputChannelTest, SendSignal_WhenPeerClosed_ReturnsAnError) {
     msg.header.type = InputMessage::TYPE_KEY;
     EXPECT_EQ(DEAD_OBJECT, clientChannel->sendMessage(&msg))
             << "sendMessage should have returned DEAD_OBJECT";
+}
+
+TEST_F(InputChannelTest, SendAndReceive_MotionClassification) {
+    sp<InputChannel> serverChannel, clientChannel;
+    status_t result = InputChannel::openInputChannelPair("channel name",
+            serverChannel, clientChannel);
+    ASSERT_EQ(OK, result)
+            << "should have successfully opened a channel pair";
+
+    std::array<MotionClassification, 3> classifications = {
+        MotionClassification::NONE,
+        MotionClassification::AMBIGUOUS_GESTURE,
+        MotionClassification::DEEP_PRESS,
+    };
+
+    InputMessage serverMsg = {}, clientMsg;
+    serverMsg.header.type = InputMessage::TYPE_MOTION;
+    serverMsg.body.motion.seq = 1;
+    serverMsg.body.motion.pointerCount = 1;
+
+    for (MotionClassification classification : classifications) {
+        // Send and receive a message with classification
+        serverMsg.body.motion.classification = classification;
+        EXPECT_EQ(OK, serverChannel->sendMessage(&serverMsg))
+                << "server channel should be able to send message to client channel";
+
+        EXPECT_EQ(OK, clientChannel->receiveMessage(&clientMsg))
+                << "client channel should be able to receive message from server channel";
+        EXPECT_EQ(serverMsg.header.type, clientMsg.header.type);
+        EXPECT_EQ(classification, clientMsg.body.motion.classification) <<
+                "Expected to receive " << motionClassificationToString(classification);
+    }
 }
 
 

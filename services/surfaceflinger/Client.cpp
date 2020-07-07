@@ -17,7 +17,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include <binder/PermissionCache.h>
 #include <binder/IPCThreadState.h>
 
 #include <private/android_filesystem_config.h>
@@ -35,39 +34,8 @@ const String16 sAccessSurfaceFlinger("android.permission.ACCESS_SURFACE_FLINGER"
 // ---------------------------------------------------------------------------
 
 Client::Client(const sp<SurfaceFlinger>& flinger)
-    : Client(flinger, nullptr)
+    : mFlinger(flinger)
 {
-}
-
-Client::Client(const sp<SurfaceFlinger>& flinger, const sp<Layer>& parentLayer)
-    : mFlinger(flinger),
-      mParentLayer(parentLayer)
-{
-}
-
-Client::~Client()
-{
-    const size_t count = mLayers.size();
-    for (size_t i=0 ; i<count ; i++) {
-        sp<Layer> l = mLayers.valueAt(i).promote();
-        if (l != nullptr) {
-            mFlinger->removeLayer(l);
-        }
-    }
-}
-
-void Client::setParentLayer(const sp<Layer>& parentLayer) {
-    Mutex::Autolock _l(mLock);
-    mParentLayer = parentLayer;
-}
-
-sp<Layer> Client::getParentLayer(bool* outParentDied) const {
-    Mutex::Autolock _l(mLock);
-    sp<Layer> parent = mParentLayer.promote();
-    if (outParentDied != nullptr) {
-        *outParentDied = (mParentLayer != nullptr && parent == nullptr);
-    }
-    return parent;
 }
 
 status_t Client::initCheck() const {
@@ -104,108 +72,38 @@ sp<Layer> Client::getLayerUser(const sp<IBinder>& handle) const
     return lbc;
 }
 
-
-status_t Client::onTransact(
-    uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
-{
-    // these must be checked
-     IPCThreadState* ipc = IPCThreadState::self();
-     const int pid = ipc->getCallingPid();
-     const int uid = ipc->getCallingUid();
-     const int self_pid = getpid();
-     // If we are called from another non root process without the GRAPHICS, SYSTEM, or ROOT
-     // uid we require the sAccessSurfaceFlinger permission.
-     // We grant an exception in the case that the Client has a "parent layer", as its
-     // effects will be scoped to that layer.
-     if (CC_UNLIKELY(pid != self_pid && uid != AID_GRAPHICS && uid != AID_SYSTEM && uid != 0)
-             && (getParentLayer() == nullptr)) {
-         // we're called from a different process, do the real check
-         if (!PermissionCache::checkCallingPermission(sAccessSurfaceFlinger))
-         {
-             ALOGE("Permission Denial: "
-                     "can't openGlobalTransaction pid=%d, uid<=%d", pid, uid);
-             return PERMISSION_DENIED;
-         }
-     }
-     return BnSurfaceComposerClient::onTransact(code, data, reply, flags);
+status_t Client::createSurface(const String8& name, uint32_t w, uint32_t h, PixelFormat format,
+                               uint32_t flags, const sp<IBinder>& parentHandle,
+                               LayerMetadata metadata, sp<IBinder>* handle,
+                               sp<IGraphicBufferProducer>* gbp) {
+    // We rely on createLayer to check permissions.
+    return mFlinger->createLayer(name, this, w, h, format, flags, std::move(metadata), handle, gbp,
+                                 parentHandle);
 }
 
-
-status_t Client::createSurface(
-        const String8& name,
-        uint32_t w, uint32_t h, PixelFormat format, uint32_t flags,
-        const sp<IBinder>& parentHandle, uint32_t windowType, uint32_t ownerUid,
-        sp<IBinder>* handle,
-        sp<IGraphicBufferProducer>* gbp)
-{
-    sp<Layer> parent = nullptr;
-    if (parentHandle != nullptr) {
-        parent = getLayerUser(parentHandle);
-        if (parent == nullptr) {
-            return NAME_NOT_FOUND;
-        }
-    }
-    if (parent == nullptr) {
-        bool parentDied;
-        parent = getParentLayer(&parentDied);
-        // If we had a parent, but it died, we've lost all
-        // our capabilities.
-        if (parentDied) {
-            return NAME_NOT_FOUND;
-        }
+status_t Client::createWithSurfaceParent(const String8& name, uint32_t w, uint32_t h,
+                                         PixelFormat format, uint32_t flags,
+                                         const sp<IGraphicBufferProducer>& parent,
+                                         LayerMetadata metadata, sp<IBinder>* handle,
+                                         sp<IGraphicBufferProducer>* gbp) {
+    if (mFlinger->authenticateSurfaceTexture(parent) == false) {
+        ALOGE("failed to authenticate surface texture");
+        return BAD_VALUE;
     }
 
-    /*
-     * createSurface must be called from the GL thread so that it can
-     * have access to the GL context.
-     */
-    class MessageCreateLayer : public MessageBase {
-        SurfaceFlinger* flinger;
-        Client* client;
-        sp<IBinder>* handle;
-        sp<IGraphicBufferProducer>* gbp;
-        status_t result;
-        const String8& name;
-        uint32_t w, h;
-        PixelFormat format;
-        uint32_t flags;
-        sp<Layer>* parent;
-        uint32_t windowType;
-        uint32_t ownerUid;
-    public:
-        MessageCreateLayer(SurfaceFlinger* flinger,
-                const String8& name, Client* client,
-                uint32_t w, uint32_t h, PixelFormat format, uint32_t flags,
-                sp<IBinder>* handle, uint32_t windowType, uint32_t ownerUid,
-                sp<IGraphicBufferProducer>* gbp,
-                sp<Layer>* parent)
-            : flinger(flinger), client(client),
-              handle(handle), gbp(gbp), result(NO_ERROR),
-              name(name), w(w), h(h), format(format), flags(flags),
-              parent(parent), windowType(windowType), ownerUid(ownerUid) {
-        }
-        status_t getResult() const { return result; }
-        virtual bool handler() {
-            result = flinger->createLayer(name, client, w, h, format, flags,
-                    windowType, ownerUid, handle, gbp, parent);
-            return true;
-        }
-    };
+    const auto& layer = (static_cast<MonitoredProducer*>(parent.get()))->getLayer();
+    if (layer == nullptr) {
+        ALOGE("failed to find parent layer");
+        return BAD_VALUE;
+    }
 
-    sp<MessageBase> msg = new MessageCreateLayer(mFlinger.get(),
-            name, this, w, h, format, flags, handle,
-            windowType, ownerUid, gbp, &parent);
-    mFlinger->postMessageSync(msg);
-    return static_cast<MessageCreateLayer*>( msg.get() )->getResult();
-}
-
-status_t Client::destroySurface(const sp<IBinder>& handle) {
-    return mFlinger->onLayerRemoved(this, handle);
+    return mFlinger->createLayer(name, this, w, h, format, flags, std::move(metadata), handle, gbp,
+                                 nullptr, layer);
 }
 
 status_t Client::clearLayerFrameStats(const sp<IBinder>& handle) const {
     sp<Layer> layer = getLayerUser(handle);
-    if (layer == NULL) {
+    if (layer == nullptr) {
         return NAME_NOT_FOUND;
     }
     layer->clearFrameStats();
@@ -214,7 +112,7 @@ status_t Client::clearLayerFrameStats(const sp<IBinder>& handle) const {
 
 status_t Client::getLayerFrameStats(const sp<IBinder>& handle, FrameStats* outStats) const {
     sp<Layer> layer = getLayerUser(handle);
-    if (layer == NULL) {
+    if (layer == nullptr) {
         return NAME_NOT_FOUND;
     }
     layer->getFrameStats(outStats);

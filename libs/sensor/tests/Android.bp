@@ -17,8 +17,11 @@ cc_test {
 
     clang: true,
 
+    cflags: ["-Wall", "-Werror"],
+
     srcs: [
         "Sensor_test.cpp",
+        "SensorEventQueue_test.cpp",
     ],
 
     shared_libs: [

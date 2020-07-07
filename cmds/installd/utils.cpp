@@ -20,18 +20,22 @@
 #include <fcntl.h>
 #include <fts.h>
 #include <stdlib.h>
+#include <sys/capability.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <sys/statvfs.h>
 
 #include <android-base/logging.h>
+#include <android-base/strings.h>
 #include <android-base/stringprintf.h>
+#include <android-base/unique_fd.h>
 #include <cutils/fs.h>
 #include <cutils/properties.h>
 #include <log/log.h>
 #include <private/android_filesystem_config.h>
 
+#include "dexopt_return_codes.h"
 #include "globals.h"  // extern variables.
 
 #ifndef LOG_TAG
@@ -40,7 +44,10 @@
 
 #define DEBUG_XATTRS 0
 
+using android::base::EndsWith;
+using android::base::Fdopendir;
 using android::base::StringPrintf;
+using android::base::unique_fd;
 
 namespace android {
 namespace installd {
@@ -61,6 +68,35 @@ bool is_valid_filename(const std::string& name) {
 static void check_package_name(const char* package_name) {
     CHECK(is_valid_filename(package_name));
     CHECK(is_valid_package_name(package_name));
+}
+
+static std::string resolve_ce_path_by_inode_or_fallback(const std::string& root_path,
+        ino_t ce_data_inode, const std::string& fallback) {
+    if (ce_data_inode != 0) {
+        DIR* dir = opendir(root_path.c_str());
+        if (dir == nullptr) {
+            PLOG(ERROR) << "Failed to opendir " << root_path;
+            return fallback;
+        }
+
+        struct dirent* ent;
+        while ((ent = readdir(dir))) {
+            if (ent->d_ino == ce_data_inode) {
+                auto resolved = StringPrintf("%s/%s", root_path.c_str(), ent->d_name);
+                if (resolved != fallback) {
+                    LOG(DEBUG) << "Resolved path " << resolved << " for inode " << ce_data_inode
+                            << " instead of " << fallback;
+                }
+                closedir(dir);
+                return resolved;
+            }
+        }
+        LOG(WARNING) << "Failed to resolve inode " << ce_data_inode << "; using " << fallback;
+        closedir(dir);
+        return fallback;
+    } else {
+        return fallback;
+    }
 }
 
 /**
@@ -87,39 +123,27 @@ std::string create_data_user_ce_package_path(const char* volume_uuid,
             create_data_user_ce_path(volume_uuid, user).c_str(), package_name);
 }
 
+/**
+ * Create the path name where package data should be stored for the given
+ * volume UUID, package name, and user ID. An empty UUID is assumed to be
+ * internal storage.
+ * Compared to create_data_user_ce_package_path this method always return the
+ * ".../user/..." directory.
+ */
+std::string create_data_user_ce_package_path_as_user_link(
+        const char* volume_uuid, userid_t userid, const char* package_name) {
+    check_package_name(package_name);
+    std::string data(create_data_path(volume_uuid));
+    return StringPrintf("%s/user/%u/%s", data.c_str(), userid, package_name);
+}
+
 std::string create_data_user_ce_package_path(const char* volume_uuid, userid_t user,
         const char* package_name, ino_t ce_data_inode) {
     // For testing purposes, rely on the inode when defined; this could be
     // optimized to use access() in the future.
     auto fallback = create_data_user_ce_package_path(volume_uuid, user, package_name);
-    if (ce_data_inode != 0) {
-        auto user_path = create_data_user_ce_path(volume_uuid, user);
-        DIR* dir = opendir(user_path.c_str());
-        if (dir == nullptr) {
-            PLOG(ERROR) << "Failed to opendir " << user_path;
-            return fallback;
-        }
-
-        struct dirent* ent;
-        while ((ent = readdir(dir))) {
-            if (ent->d_ino == ce_data_inode) {
-                auto resolved = StringPrintf("%s/%s", user_path.c_str(), ent->d_name);
-#if DEBUG_XATTRS
-                if (resolved != fallback) {
-                    LOG(DEBUG) << "Resolved path " << resolved << " for inode " << ce_data_inode
-                            << " instead of " << fallback;
-                }
-#endif
-                closedir(dir);
-                return resolved;
-            }
-        }
-        LOG(WARNING) << "Failed to resolve inode " << ce_data_inode << "; using " << fallback;
-        closedir(dir);
-        return fallback;
-    } else {
-        return fallback;
-    }
+    auto user_path = create_data_user_ce_path(volume_uuid, user);
+    return resolve_ce_path_by_inode_or_fallback(user_path, ce_data_inode, fallback);
 }
 
 std::string create_data_user_de_package_path(const char* volume_uuid,
@@ -127,24 +151,6 @@ std::string create_data_user_de_package_path(const char* volume_uuid,
     check_package_name(package_name);
     return StringPrintf("%s/%s",
             create_data_user_de_path(volume_uuid, user).c_str(), package_name);
-}
-
-int create_pkg_path(char path[PKG_PATH_MAX], const char *pkgname,
-        const char *postfix, userid_t userid) {
-    if (!is_valid_package_name(pkgname)) {
-        path[0] = '\0';
-        return -1;
-    }
-
-    std::string _tmp(create_data_user_ce_package_path(nullptr, userid, pkgname) + postfix);
-    const char* tmp = _tmp.c_str();
-    if (strlen(tmp) >= PKG_PATH_MAX) {
-        path[0] = '\0';
-        return -1;
-    } else {
-        strcpy(path, tmp);
-        return 0;
-    }
 }
 
 std::string create_data_path(const char* volume_uuid) {
@@ -168,18 +174,19 @@ std::string create_data_app_path(const char* volume_uuid) {
 
 /**
  * Create the path name for user data for a certain userid.
+ * Keep same implementation as vold to minimize path walking overhead
  */
 std::string create_data_user_ce_path(const char* volume_uuid, userid_t userid) {
     std::string data(create_data_path(volume_uuid));
-    if (volume_uuid == nullptr) {
-        if (userid == 0) {
-            return StringPrintf("%s/data", data.c_str());
-        } else {
-            return StringPrintf("%s/user/%u", data.c_str(), userid);
+    if (volume_uuid == nullptr && userid == 0) {
+        std::string legacy = StringPrintf("%s/data", data.c_str());
+        struct stat sb;
+        if (lstat(legacy.c_str(), &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            /* /data/data is dir, return /data/data for legacy system */
+            return legacy;
         }
-    } else {
-        return StringPrintf("%s/user/%u", data.c_str(), userid);
     }
+    return StringPrintf("%s/user/%u", data.c_str(), userid);
 }
 
 /**
@@ -190,15 +197,51 @@ std::string create_data_user_de_path(const char* volume_uuid, userid_t userid) {
     return StringPrintf("%s/user_de/%u", data.c_str(), userid);
 }
 
+std::string create_data_misc_ce_rollback_base_path(const char* volume_uuid, userid_t user) {
+    return StringPrintf("%s/misc_ce/%u/rollback", create_data_path(volume_uuid).c_str(), user);
+}
+
+std::string create_data_misc_de_rollback_base_path(const char* volume_uuid, userid_t user) {
+    return StringPrintf("%s/misc_de/%u/rollback", create_data_path(volume_uuid).c_str(), user);
+}
+
+std::string create_data_misc_ce_rollback_path(const char* volume_uuid, userid_t user,
+        int32_t snapshot_id) {
+    return StringPrintf("%s/%d", create_data_misc_ce_rollback_base_path(volume_uuid, user).c_str(),
+          snapshot_id);
+}
+
+std::string create_data_misc_de_rollback_path(const char* volume_uuid, userid_t user,
+        int32_t snapshot_id) {
+    return StringPrintf("%s/%d", create_data_misc_de_rollback_base_path(volume_uuid, user).c_str(),
+          snapshot_id);
+}
+
+std::string create_data_misc_ce_rollback_package_path(const char* volume_uuid,
+        userid_t user, int32_t snapshot_id, const char* package_name) {
+    return StringPrintf("%s/%s",
+           create_data_misc_ce_rollback_path(volume_uuid, user, snapshot_id).c_str(), package_name);
+}
+
+std::string create_data_misc_ce_rollback_package_path(const char* volume_uuid,
+        userid_t user, int32_t snapshot_id, const char* package_name, ino_t ce_rollback_inode) {
+    auto fallback = create_data_misc_ce_rollback_package_path(volume_uuid, user, snapshot_id,
+            package_name);
+    auto user_path = create_data_misc_ce_rollback_path(volume_uuid, user, snapshot_id);
+    return resolve_ce_path_by_inode_or_fallback(user_path, ce_rollback_inode, fallback);
+}
+
+std::string create_data_misc_de_rollback_package_path(const char* volume_uuid,
+        userid_t user, int32_t snapshot_id, const char* package_name) {
+    return StringPrintf("%s/%s",
+           create_data_misc_de_rollback_path(volume_uuid, user, snapshot_id).c_str(), package_name);
+}
+
 /**
  * Create the path name for media for a certain userid.
  */
 std::string create_data_media_path(const char* volume_uuid, userid_t userid) {
     return StringPrintf("%s/media/%u", create_data_path(volume_uuid).c_str(), userid);
-}
-
-std::string create_data_media_obb_path(const char* volume_uuid, const char* package_name) {
-    return StringPrintf("%s/media/obb/%s", create_data_path(volume_uuid).c_str(), package_name);
 }
 
 std::string create_data_media_package_path(const char* volume_uuid, userid_t userid,
@@ -212,7 +255,7 @@ std::string create_data_misc_legacy_path(userid_t userid) {
 }
 
 std::string create_primary_cur_profile_dir_path(userid_t userid) {
-    return StringPrintf("%s/cur/%u", android_profiles_dir.path, userid);
+    return StringPrintf("%s/cur/%u", android_profiles_dir.c_str(), userid);
 }
 
 std::string create_primary_current_profile_package_dir_path(userid_t user,
@@ -223,12 +266,12 @@ std::string create_primary_current_profile_package_dir_path(userid_t user,
 }
 
 std::string create_primary_ref_profile_dir_path() {
-    return StringPrintf("%s/ref", android_profiles_dir.path);
+    return StringPrintf("%s/ref", android_profiles_dir.c_str());
 }
 
 std::string create_primary_reference_profile_package_dir_path(const std::string& package_name) {
     check_package_name(package_name.c_str());
-    return StringPrintf("%s/ref/%s", android_profiles_dir.path, package_name.c_str());
+    return StringPrintf("%s/ref/%s", android_profiles_dir.c_str(), package_name.c_str());
 }
 
 std::string create_data_dalvik_cache_path() {
@@ -237,36 +280,68 @@ std::string create_data_dalvik_cache_path() {
 
 // Keep profile paths in sync with ActivityThread and LoadedApk.
 const std::string PROFILE_EXT = ".prof";
-const std::string PRIMARY_PROFILE_NAME = "primary" + PROFILE_EXT;
+const std::string CURRENT_PROFILE_EXT = ".cur";
+const std::string SNAPSHOT_PROFILE_EXT = ".snapshot";
 
-std::string create_current_profile_path(userid_t user, const std::string& location,
-        bool is_secondary_dex) {
+// Gets the parent directory and the file name for the given secondary dex path.
+// Returns true on success, false on failure (if the dex_path does not have the expected
+// structure).
+static bool get_secondary_dex_location(const std::string& dex_path,
+        std::string* out_dir_name, std::string* out_file_name) {
+   size_t dirIndex = dex_path.rfind('/');
+   if (dirIndex == std::string::npos) {
+        return false;
+   }
+   if (dirIndex == dex_path.size() - 1) {
+        return false;
+   }
+   *out_dir_name = dex_path.substr(0, dirIndex);
+   *out_file_name = dex_path.substr(dirIndex + 1);
+
+   return true;
+}
+
+std::string create_current_profile_path(userid_t user, const std::string& package_name,
+        const std::string& location, bool is_secondary_dex) {
     if (is_secondary_dex) {
-        // Secondary dex profiles are stored next to the dex files using .prof extension.
-        return StringPrintf("%s%s", location.c_str(), PROFILE_EXT.c_str());
+        // Secondary dex current profiles are stored next to the dex files under the oat folder.
+        std::string dex_dir;
+        std::string dex_name;
+        CHECK(get_secondary_dex_location(location, &dex_dir, &dex_name))
+                << "Unexpected dir structure for secondary dex " << location;
+        return StringPrintf("%s/oat/%s%s%s",
+                dex_dir.c_str(), dex_name.c_str(), CURRENT_PROFILE_EXT.c_str(),
+                PROFILE_EXT.c_str());
     } else {
         // Profiles for primary apks are under /data/misc/profiles/cur.
-        std::string profile_dir = create_primary_current_profile_package_dir_path(user, location);
-        return StringPrintf("%s/%s", profile_dir.c_str(), PRIMARY_PROFILE_NAME.c_str());
+        std::string profile_dir = create_primary_current_profile_package_dir_path(
+                user, package_name);
+        return StringPrintf("%s/%s", profile_dir.c_str(), location.c_str());
     }
 }
 
-std::string create_reference_profile_path(const std::string& location, bool is_secondary_dex) {
+std::string create_reference_profile_path(const std::string& package_name,
+        const std::string& location, bool is_secondary_dex) {
     if (is_secondary_dex) {
         // Secondary dex reference profiles are stored next to the dex files under the oat folder.
-        size_t dirIndex = location.rfind('/');
-        CHECK(dirIndex != std::string::npos)
+        std::string dex_dir;
+        std::string dex_name;
+        CHECK(get_secondary_dex_location(location, &dex_dir, &dex_name))
                 << "Unexpected dir structure for secondary dex " << location;
-
-        std::string dex_dir = location.substr(0, dirIndex);
-        std::string dex_name = location.substr(dirIndex +1);
         return StringPrintf("%s/oat/%s%s",
                 dex_dir.c_str(), dex_name.c_str(), PROFILE_EXT.c_str());
     } else {
         // Reference profiles for primary apks are stored in /data/misc/profile/ref.
-        std::string profile_dir = create_primary_reference_profile_package_dir_path(location);
-        return StringPrintf("%s/%s", profile_dir.c_str(), PRIMARY_PROFILE_NAME.c_str());
+        std::string profile_dir = create_primary_reference_profile_package_dir_path(package_name);
+        return StringPrintf("%s/%s", profile_dir.c_str(), location.c_str());
     }
+}
+
+std::string create_snapshot_profile_path(const std::string& package,
+        const std::string& profile_name) {
+    std::string ref_profile = create_reference_profile_path(package, profile_name,
+            /*is_secondary_dex*/ false);
+    return ref_profile + SNAPSHOT_PROFILE_EXT;
 }
 
 std::vector<userid_t> get_known_users(const char* volume_uuid) {
@@ -277,7 +352,7 @@ std::vector<userid_t> get_known_users(const char* volume_uuid) {
 
     std::string path(create_data_path(volume_uuid) + "/" + SECONDARY_USER_PREFIX);
     DIR* dir = opendir(path.c_str());
-    if (dir == NULL) {
+    if (dir == nullptr) {
         // Unable to discover other users, but at least return owner
         PLOG(ERROR) << "Failed to opendir " << path;
         return users;
@@ -307,13 +382,13 @@ int calculate_tree_size(const std::string& path, int64_t* size,
     FTSENT *p;
     int64_t matchedSize = 0;
     char *argv[] = { (char*) path.c_str(), nullptr };
-    if (!(fts = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL))) {
+    if (!(fts = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, nullptr))) {
         if (errno != ENOENT) {
             PLOG(ERROR) << "Failed to fts_open " << path;
         }
         return -1;
     }
-    while ((p = fts_read(fts)) != NULL) {
+    while ((p = fts_read(fts)) != nullptr) {
         switch (p->fts_info) {
         case FTS_D:
         case FTS_DEFAULT:
@@ -351,20 +426,6 @@ int calculate_tree_size(const std::string& path, int64_t* size,
     }
 #endif
     *size += matchedSize;
-    return 0;
-}
-
-int create_move_path(char path[PKG_PATH_MAX],
-    const char* pkgname,
-    const char* leaf,
-    userid_t userid ATTRIBUTE_UNUSED)
-{
-    if ((android_data_dir.len + strlen(PRIMARY_USER_PREFIX) + strlen(pkgname) + strlen(leaf) + 1)
-            >= PKG_PATH_MAX) {
-        return -1;
-    }
-
-    sprintf(path, "%s%s%s/%s", android_data_dir.path, PRIMARY_USER_PREFIX, pkgname, leaf);
     return 0;
 }
 
@@ -450,7 +511,7 @@ static int _delete_dir_contents(DIR *d,
                 continue;
             }
             subdir = fdopendir(subfd);
-            if (subdir == NULL) {
+            if (subdir == nullptr) {
                 ALOGE("Couldn't fdopendir %s: %s\n", name, strerror(errno));
                 close(subfd);
                 result = -1;
@@ -475,12 +536,36 @@ static int _delete_dir_contents(DIR *d,
     return result;
 }
 
+int create_dir_if_needed(const std::string& pathname, mode_t perms) {
+    struct stat st;
+
+    int rc;
+    if ((rc = stat(pathname.c_str(), &st)) != 0) {
+        if (errno == ENOENT) {
+            return mkdir(pathname.c_str(), perms);
+        } else {
+            return rc;
+        }
+    } else if (!S_ISDIR(st.st_mode)) {
+        LOG(DEBUG) << pathname << " is not a folder";
+        return -1;
+    }
+
+    mode_t actual_perms = st.st_mode & ALLPERMS;
+    if (actual_perms != perms) {
+        LOG(WARNING) << pathname << " permissions " << actual_perms << " expected " << perms;
+        return -1;
+    }
+
+    return 0;
+}
+
 int delete_dir_contents(const std::string& pathname, bool ignore_if_missing) {
-    return delete_dir_contents(pathname.c_str(), 0, NULL, ignore_if_missing);
+    return delete_dir_contents(pathname.c_str(), 0, nullptr, ignore_if_missing);
 }
 
 int delete_dir_contents_and_dir(const std::string& pathname, bool ignore_if_missing) {
-    return delete_dir_contents(pathname.c_str(), 1, NULL, ignore_if_missing);
+    return delete_dir_contents(pathname.c_str(), 1, nullptr, ignore_if_missing);
 }
 
 int delete_dir_contents(const char *pathname,
@@ -492,7 +577,7 @@ int delete_dir_contents(const char *pathname,
     DIR *d;
 
     d = opendir(pathname);
-    if (d == NULL) {
+    if (d == nullptr) {
         if (ignore_if_missing && (errno == ENOENT)) {
             return 0;
         }
@@ -521,12 +606,12 @@ int delete_dir_contents_fd(int dfd, const char *name)
         return -1;
     }
     d = fdopendir(fd);
-    if (d == NULL) {
+    if (d == nullptr) {
         ALOGE("Couldn't fdopendir %s: %s\n", name, strerror(errno));
         close(fd);
         return -1;
     }
-    res = _delete_dir_contents(d, 0);
+    res = _delete_dir_contents(d, nullptr);
     closedir(d);
     return res;
 }
@@ -554,7 +639,7 @@ static int _copy_dir_files(int sdfd, int ddfd, uid_t owner, gid_t group)
     }
 
     DIR *ds = fdopendir(sdfd);
-    if (ds == NULL) {
+    if (ds == nullptr) {
         ALOGE("Couldn't fdopendir: %s\n", strerror(errno));
         return -1;
     }
@@ -600,18 +685,18 @@ int copy_dir_files(const char *srcname,
                    uid_t group)
 {
     int res = 0;
-    DIR *ds = NULL;
-    DIR *dd = NULL;
+    DIR *ds = nullptr;
+    DIR *dd = nullptr;
 
     ds = opendir(srcname);
-    if (ds == NULL) {
+    if (ds == nullptr) {
         ALOGE("Couldn't opendir %s: %s\n", srcname, strerror(errno));
         return -errno;
     }
 
     mkdir(dstname, 0600);
     dd = opendir(dstname);
-    if (dd == NULL) {
+    if (dd == nullptr) {
         ALOGE("Couldn't opendir %s: %s\n", dstname, strerror(errno));
         closedir(ds);
         return -errno;
@@ -632,7 +717,7 @@ int copy_dir_files(const char *srcname,
 int64_t data_disk_free(const std::string& data_path) {
     struct statvfs sfs;
     if (statvfs(data_path.c_str(), &sfs) == 0) {
-        return sfs.f_bavail * sfs.f_frsize;
+        return static_cast<int64_t>(sfs.f_bavail) * sfs.f_frsize;
     } else {
         PLOG(ERROR) << "Couldn't statvfs " << data_path;
         return -1;
@@ -732,27 +817,47 @@ std::string read_path_inode(const std::string& parent, const char* name, const c
     }
 }
 
+void remove_path_xattr(const std::string& path, const char* inode_xattr) {
+    if (removexattr(path.c_str(), inode_xattr) && errno != ENODATA) {
+        PLOG(ERROR) << "Failed to remove xattr " << inode_xattr << " at " << path;
+    }
+}
+
 /**
  * Validate that the path is valid in the context of the provided directory.
  * The path is allowed to have at most one subdirectory and no indirections
  * to top level directories (i.e. have "..").
  */
-static int validate_path(const dir_rec_t* dir, const char* path, int maxSubdirs) {
-    size_t dir_len = dir->len;
-    const char* subdir = strchr(path + dir_len, '/');
-
-    // Only allow the path to have at most one subdirectory.
-    if (subdir != NULL) {
-        ++subdir;
-        if ((--maxSubdirs == 0) && strchr(subdir, '/') != NULL) {
-            ALOGE("invalid apk path '%s' (subdir?)\n", path);
-            return -1;
-        }
+static int validate_path(const std::string& dir, const std::string& path, int maxSubdirs) {
+    // Argument sanity checking
+    if (dir.find('/') != 0 || dir.rfind('/') != dir.size() - 1
+            || dir.find("..") != std::string::npos) {
+        LOG(ERROR) << "Invalid directory " << dir;
+        return -1;
+    }
+    if (path.find("..") != std::string::npos) {
+        LOG(ERROR) << "Invalid path " << path;
+        return -1;
     }
 
-    // Directories can't have a period directly after the directory markers to prevent "..".
-    if ((path[dir_len] == '.') || ((subdir != NULL) && (*subdir == '.'))) {
-        ALOGE("invalid apk path '%s' (trickery)\n", path);
+    if (path.compare(0, dir.size(), dir) != 0) {
+        // Common case, path isn't under directory
+        return -1;
+    }
+
+    // Count number of subdirectories
+    auto pos = path.find('/', dir.size());
+    int count = 0;
+    while (pos != std::string::npos) {
+        auto next = path.find('/', pos + 1);
+        if (next > pos + 1) {
+            count++;
+        }
+        pos = next;
+    }
+
+    if (count > maxSubdirs) {
+        LOG(ERROR) << "Invalid path depth " << path << " when tested against " << dir;
         return -1;
     }
 
@@ -764,15 +869,12 @@ static int validate_path(const dir_rec_t* dir, const char* path, int maxSubdirs)
  * if it is a system app or -1 if it is not.
  */
 int validate_system_app_path(const char* path) {
-    size_t i;
-
-    for (i = 0; i < android_system_dirs.count; i++) {
-        const size_t dir_len = android_system_dirs.dirs[i].len;
-        if (!strncmp(path, android_system_dirs.dirs[i].path, dir_len)) {
-            return validate_path(android_system_dirs.dirs + i, path, 1);
+    std::string path_ = path;
+    for (const auto& dir : android_system_dirs) {
+        if (validate_path(dir, path, 1) == 0) {
+            return 0;
         }
     }
-
     return -1;
 }
 
@@ -780,106 +882,37 @@ bool validate_secondary_dex_path(const std::string& pkgname, const std::string& 
         const char* volume_uuid, int uid, int storage_flag) {
     CHECK(storage_flag == FLAG_STORAGE_CE || storage_flag == FLAG_STORAGE_DE);
 
+    // Empty paths are not allowed.
+    if (dex_path.empty()) { return false; }
+    // First character should always be '/'. No relative paths.
+    if (dex_path[0] != '/') { return false; }
+    // The last character should not be '/'.
+    if (dex_path[dex_path.size() - 1] == '/') { return false; }
+    // There should be no '.' after the directory marker.
+    if (dex_path.find("/.") != std::string::npos) { return false; }
+    // The path should be at most PKG_PATH_MAX long.
+    if (dex_path.size() > PKG_PATH_MAX) { return false; }
+
+    // The dex_path should be under the app data directory.
     std::string app_private_dir = storage_flag == FLAG_STORAGE_CE
-        ? create_data_user_ce_package_path(
-                volume_uuid, multiuser_get_user_id(uid), pkgname.c_str())
-        : create_data_user_de_package_path(
+            ? create_data_user_ce_package_path(
+                    volume_uuid, multiuser_get_user_id(uid), pkgname.c_str())
+            : create_data_user_de_package_path(
+                    volume_uuid, multiuser_get_user_id(uid), pkgname.c_str());
+
+    if (strncmp(dex_path.c_str(), app_private_dir.c_str(), app_private_dir.size()) != 0) {
+        // The check above might fail if the dex file is accessed via the /data/user/0 symlink.
+        // If that's the case, attempt to validate against the user data link.
+        std::string app_private_dir_symlink = create_data_user_ce_package_path_as_user_link(
                 volume_uuid, multiuser_get_user_id(uid), pkgname.c_str());
-    dir_rec_t dir;
-    if (get_path_from_string(&dir, app_private_dir.c_str()) != 0) {
-        LOG(WARNING) << "Could not get dir rec for " << app_private_dir;
-        return false;
-    }
-    // Usually secondary dex files have a nested directory structure.
-    // Pick at most 10 subdirectories when validating (arbitrary value).
-    // If the secondary dex file is >10 directory nested then validation will
-    // fail and the file will not be compiled.
-    return validate_path(&dir, dex_path.c_str(), /*max_subdirs*/ 10) == 0;
-}
-
-/**
- * Get the contents of a environment variable that contains a path. Caller
- * owns the string that is inserted into the directory record. Returns
- * 0 on success and -1 on error.
- */
-int get_path_from_env(dir_rec_t* rec, const char* var) {
-    const char* path = getenv(var);
-    int ret = get_path_from_string(rec, path);
-    if (ret < 0) {
-        ALOGW("Problem finding value for environment variable %s\n", var);
-    }
-    return ret;
-}
-
-/**
- * Puts the string into the record as a directory. Appends '/' to the end
- * of all paths. Caller owns the string that is inserted into the directory
- * record. A null value will result in an error.
- *
- * Returns 0 on success and -1 on error.
- */
-int get_path_from_string(dir_rec_t* rec, const char* path) {
-    if (path == NULL) {
-        return -1;
-    } else {
-        const size_t path_len = strlen(path);
-        if (path_len <= 0) {
-            return -1;
-        }
-
-        // Make sure path is absolute.
-        if (path[0] != '/') {
-            return -1;
-        }
-
-        if (path[path_len - 1] == '/') {
-            // Path ends with a forward slash. Make our own copy.
-
-            rec->path = strdup(path);
-            if (rec->path == NULL) {
-                return -1;
-            }
-
-            rec->len = path_len;
-        } else {
-            // Path does not end with a slash. Generate a new string.
-            char *dst;
-
-            // Add space for slash and terminating null.
-            size_t dst_size = path_len + 2;
-
-            rec->path = (char*) malloc(dst_size);
-            if (rec->path == NULL) {
-                return -1;
-            }
-
-            dst = rec->path;
-
-            if (append_and_increment(&dst, path, &dst_size) < 0
-                    || append_and_increment(&dst, "/", &dst_size)) {
-                ALOGE("Error canonicalizing path");
-                return -1;
-            }
-
-            rec->len = dst - rec->path;
+        if (strncmp(dex_path.c_str(), app_private_dir_symlink.c_str(),
+                app_private_dir_symlink.size()) != 0) {
+            return false;
         }
     }
-    return 0;
-}
 
-int copy_and_append(dir_rec_t* dst, const dir_rec_t* src, const char* suffix) {
-    dst->len = src->len + strlen(suffix);
-    const size_t dstSize = dst->len + 1;
-    dst->path = (char*) malloc(dstSize);
-
-    if (dst->path == NULL
-            || snprintf(dst->path, dstSize, "%s%s", src->path, suffix)
-                    != (ssize_t) dst->len) {
-        ALOGE("Could not allocate memory to hold appended path; aborting\n");
-        return -1;
-    }
-
-    return 0;
+    // If we got here we have a valid path.
+    return true;
 }
 
 /**
@@ -888,26 +921,27 @@ int copy_and_append(dir_rec_t* dst, const dir_rec_t* src, const char* suffix) {
  * that path. Returns -1 when an invalid path is encountered and 0 when a valid path
  * is encountered.
  */
-static int validate_apk_path_internal(const char *path, int maxSubdirs) {
-    const dir_rec_t* dir = NULL;
-    if (!strncmp(path, android_app_dir.path, android_app_dir.len)) {
-        dir = &android_app_dir;
-    } else if (!strncmp(path, android_app_private_dir.path, android_app_private_dir.len)) {
-        dir = &android_app_private_dir;
-    } else if (!strncmp(path, android_app_ephemeral_dir.path, android_app_ephemeral_dir.len)) {
-        dir = &android_app_ephemeral_dir;
-    } else if (!strncmp(path, android_asec_dir.path, android_asec_dir.len)) {
-        dir = &android_asec_dir;
-    } else if (!strncmp(path, android_mnt_expand_dir.path, android_mnt_expand_dir.len)) {
-        dir = &android_mnt_expand_dir;
-        if (maxSubdirs < 2) {
-            maxSubdirs = 2;
+static int validate_apk_path_internal(const std::string& path, int maxSubdirs) {
+    if (validate_path(android_app_dir, path, maxSubdirs) == 0) {
+        return 0;
+    } else if (validate_path(android_staging_dir, path, maxSubdirs) == 0) {
+        return 0;
+    } else if (validate_path(android_app_private_dir, path, maxSubdirs) == 0) {
+        return 0;
+    } else if (validate_path(android_app_ephemeral_dir, path, maxSubdirs) == 0) {
+        return 0;
+    } else if (validate_path(android_asec_dir, path, maxSubdirs) == 0) {
+        return 0;
+    } else if (android::base::StartsWith(path, android_mnt_expand_dir)) {
+        // Rewrite the path as if it were on internal storage, and test that
+        size_t end = path.find('/', android_mnt_expand_dir.size() + 1);
+        if (end != std::string::npos) {
+            auto modified = path;
+            modified.replace(0, end + 1, android_data_dir);
+            return validate_apk_path_internal(modified, maxSubdirs);
         }
-    } else {
-        return -1;
     }
-
-    return validate_path(dir, path, maxSubdirs);
+    return -1;
 }
 
 int validate_apk_path(const char* path) {
@@ -916,48 +950,6 @@ int validate_apk_path(const char* path) {
 
 int validate_apk_path_subdirs(const char* path) {
     return validate_apk_path_internal(path, 3 /* maxSubdirs */);
-}
-
-int append_and_increment(char** dst, const char* src, size_t* dst_size) {
-    ssize_t ret = strlcpy(*dst, src, *dst_size);
-    if (ret < 0 || (size_t) ret >= *dst_size) {
-        return -1;
-    }
-    *dst += ret;
-    *dst_size -= ret;
-    return 0;
-}
-
-char *build_string2(const char *s1, const char *s2) {
-    if (s1 == NULL || s2 == NULL) return NULL;
-
-    int len_s1 = strlen(s1);
-    int len_s2 = strlen(s2);
-    int len = len_s1 + len_s2 + 1;
-    char *result = (char *) malloc(len);
-    if (result == NULL) return NULL;
-
-    strcpy(result, s1);
-    strcpy(result + len_s1, s2);
-
-    return result;
-}
-
-char *build_string3(const char *s1, const char *s2, const char *s3) {
-    if (s1 == NULL || s2 == NULL || s3 == NULL) return NULL;
-
-    int len_s1 = strlen(s1);
-    int len_s2 = strlen(s2);
-    int len_s3 = strlen(s3);
-    int len = len_s1 + len_s2 + len_s3 + 1;
-    char *result = (char *) malloc(len);
-    if (result == NULL) return NULL;
-
-    strcpy(result, s1);
-    strcpy(result + len_s1, s2);
-    strcpy(result + len_s1 + len_s2, s3);
-
-    return result;
 }
 
 int ensure_config_user_dirs(userid_t userid) {
@@ -1032,7 +1024,7 @@ int prepare_app_cache_dir(const std::string& parent, const char* name, mode_t ta
     } else {
         // Mismatched GID/mode is recoverable; fall through to update
         LOG(DEBUG) << "Mismatched cache GID/mode at " << path << ": found " << st.st_gid
-                << " but expected " << gid;
+                << "/" << actual_mode << " but expected " << gid << "/" << target_mode;
     }
 
     // Directory is owned correctly, but GID or mode mismatch means it's
@@ -1040,17 +1032,17 @@ int prepare_app_cache_dir(const std::string& parent, const char* name, mode_t ta
     FTS *fts;
     FTSENT *p;
     char *argv[] = { (char*) path.c_str(), nullptr };
-    if (!(fts = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, NULL))) {
+    if (!(fts = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, nullptr))) {
         PLOG(ERROR) << "Failed to fts_open " << path;
         return -1;
     }
-    while ((p = fts_read(fts)) != NULL) {
+    while ((p = fts_read(fts)) != nullptr) {
         switch (p->fts_info) {
         case FTS_DP:
             if (chmod(p->fts_path, target_mode) != 0) {
                 PLOG(WARNING) << "Failed to chmod " << p->fts_path;
             }
-            // Intentional fall through to also set GID
+            [[fallthrough]]; // to also set GID
         case FTS_F:
             if (chown(p->fts_path, -1, gid) != 0) {
                 PLOG(WARNING) << "Failed to chown " << p->fts_path;
@@ -1066,6 +1058,97 @@ int prepare_app_cache_dir(const std::string& parent, const char* name, mode_t ta
     }
     fts_close(fts);
     return 0;
+}
+
+// Collect all non empty profiles from the given directory and puts then into profile_paths.
+// The profiles are identified based on PROFILE_EXT extension.
+// If a subdirectory or profile file cannot be opened the method logs a warning and moves on.
+// It returns true if there were no errors at all, and false otherwise.
+static bool collect_profiles(DIR* d,
+                             const std::string& current_path,
+                             std::vector<std::string>* profiles_paths) {
+    int32_t dir_fd = dirfd(d);
+    if (dir_fd < 0) {
+        return false;
+    }
+
+    bool result = true;
+    struct dirent* dir_entry;
+    while ((dir_entry = readdir(d))) {
+        std::string name = dir_entry->d_name;
+        std::string local_path = current_path + "/" + name;
+
+        if (dir_entry->d_type == DT_REG) {
+            // Check if this is a non empty profile file.
+            if (EndsWith(name, PROFILE_EXT)) {
+                struct stat st;
+                if (stat(local_path.c_str(), &st) != 0) {
+                    PLOG(WARNING) << "Cannot stat local path " << local_path;
+                    result = false;
+                    continue;
+                } else if (st.st_size > 0) {
+                    profiles_paths->push_back(local_path);
+                }
+            }
+        } else if (dir_entry->d_type == DT_DIR) {
+            // always skip "." and ".."
+            if (name == "." || name == "..") {
+                continue;
+            }
+
+            unique_fd subdir_fd(openat(dir_fd, name.c_str(),
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            if (subdir_fd < 0) {
+                PLOG(WARNING) << "Could not open dir path " << local_path;
+                result = false;
+                continue;
+            }
+
+            DIR* subdir = Fdopendir(std::move(subdir_fd));
+            if (subdir == nullptr) {
+                PLOG(WARNING) << "Could not open dir path " << local_path;
+                result = false;
+                continue;
+            }
+            bool new_result = collect_profiles(subdir, local_path, profiles_paths);
+            result = result && new_result;
+            if (closedir(subdir) != 0) {
+                PLOG(WARNING) << "Could not close dir path " << local_path;
+            }
+        }
+    }
+
+    return result;
+}
+
+bool collect_profiles(std::vector<std::string>* profiles_paths) {
+    DIR* d = opendir(android_profiles_dir.c_str());
+    if (d == nullptr) {
+        return false;
+    } else {
+        return collect_profiles(d, android_profiles_dir, profiles_paths);
+    }
+}
+
+void drop_capabilities(uid_t uid) {
+    if (setgid(uid) != 0) {
+        PLOG(ERROR) << "setgid(" << uid << ") failed in installd during dexopt";
+        exit(DexoptReturnCodes::kSetGid);
+    }
+    if (setuid(uid) != 0) {
+        PLOG(ERROR) << "setuid(" << uid << ") failed in installd during dexopt";
+        exit(DexoptReturnCodes::kSetUid);
+    }
+    // drop capabilities
+    struct __user_cap_header_struct capheader;
+    struct __user_cap_data_struct capdata[2];
+    memset(&capheader, 0, sizeof(capheader));
+    memset(&capdata, 0, sizeof(capdata));
+    capheader.version = _LINUX_CAPABILITY_VERSION_3;
+    if (capset(&capheader, &capdata[0]) < 0) {
+        PLOG(ERROR) << "capset failed";
+        exit(DexoptReturnCodes::kCapSet);
+    }
 }
 
 }  // namespace installd

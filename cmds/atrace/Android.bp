@@ -3,18 +3,23 @@
 cc_binary {
     name: "atrace",
     srcs: ["atrace.cpp"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
 
     shared_libs: [
         "libbinder",
         "libhwbinder",
-        "android.hidl.manager@1.0",
         "libhidlbase",
         "libhidltransport",
         "liblog",
-        "libcutils",
         "libutils",
+        "libcutils",
         "libz",
         "libbase",
+        "libpdx_default_transport",
+        "android.hardware.atrace@1.0",
     ],
 
     init_rc: ["atrace.rc"],

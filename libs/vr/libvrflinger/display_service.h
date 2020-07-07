@@ -1,9 +1,9 @@
 #ifndef ANDROID_DVR_SERVICES_DISPLAYD_DISPLAY_SERVICE_H_
 #define ANDROID_DVR_SERVICES_DISPLAYD_DISPLAY_SERVICE_H_
 
+#include <dvr/dvr_api.h>
 #include <pdx/service.h>
 #include <pdx/status.h>
-#include <private/dvr/buffer_hub_client.h>
 #include <private/dvr/bufferhub_rpc.h>
 #include <private/dvr/display_protocol.h>
 
@@ -40,8 +40,10 @@ class DisplayService : public pdx::ServiceBase<DisplayService> {
   // any change to client/manager attributes that affect visibility or z order.
   void UpdateActiveDisplaySurfaces();
 
-  pdx::Status<BorrowedNativeBufferHandle> SetupNamedBuffer(
-      const std::string& name, size_t size, uint64_t usage);
+  pdx::Status<BorrowedNativeBufferHandle> SetupGlobalBuffer(
+      DvrGlobalBufferKey key, size_t size, uint64_t usage);
+
+  pdx::Status<void> DeleteGlobalBuffer(DvrGlobalBufferKey key);
 
   template <class A>
   void ForEachDisplaySurface(SurfaceType surface_type, A action) const {
@@ -57,19 +59,9 @@ class DisplayService : public pdx::ServiceBase<DisplayService> {
   void SetDisplayConfigurationUpdateNotifier(
       DisplayConfigurationUpdateNotifier notifier);
 
-  using VSyncCallback = HardwareComposer::VSyncCallback;
-  void SetVSyncCallback(VSyncCallback callback) {
-    hardware_composer_.SetVSyncCallback(callback);
-  }
-
-  HWCDisplayMetrics GetDisplayMetrics() {
-    return hardware_composer_.display_metrics();
-  }
-
   void GrantDisplayOwnership() { hardware_composer_.Enable(); }
   void SeizeDisplayOwnership() { hardware_composer_.Disable(); }
-
-  void OnHardwareComposerRefresh();
+  void OnBootFinished() { hardware_composer_.OnBootFinished(); }
 
  private:
   friend BASE;
@@ -80,13 +72,21 @@ class DisplayService : public pdx::ServiceBase<DisplayService> {
   using RequestDisplayCallback = std::function<void(bool)>;
 
   DisplayService(android::Hwc2::Composer* hidl,
+                 hwc2_display_t primary_display_id,
                  RequestDisplayCallback request_display_callback);
 
-  pdx::Status<BorrowedNativeBufferHandle> OnGetNamedBuffer(
-      pdx::Message& message, const std::string& name);
+  pdx::Status<BorrowedNativeBufferHandle> OnGetGlobalBuffer(
+      pdx::Message& message, DvrGlobalBufferKey key);
   pdx::Status<display::Metrics> OnGetMetrics(pdx::Message& message);
+  pdx::Status<std::string> OnGetConfigurationData(
+      pdx::Message& message, display::ConfigFileType config_type);
   pdx::Status<display::SurfaceInfo> OnCreateSurface(
       pdx::Message& message, const display::SurfaceAttributes& attributes);
+  pdx::Status<BorrowedNativeBufferHandle> OnSetupGlobalBuffer(
+      pdx::Message& message, DvrGlobalBufferKey key, size_t size,
+      uint64_t usage);
+  pdx::Status<void> OnDeleteGlobalBuffer(pdx::Message& message,
+                                         DvrGlobalBufferKey key);
 
   // Temporary query for current VR status. Will be removed later.
   pdx::Status<bool> IsVrAppRunning(pdx::Message& message);
@@ -109,11 +109,11 @@ class DisplayService : public pdx::ServiceBase<DisplayService> {
   pdx::Status<void> HandleSurfaceMessage(pdx::Message& message);
 
   HardwareComposer hardware_composer_;
-  RequestDisplayCallback request_display_callback_;
   EpollEventDispatcher dispatcher_;
   DisplayConfigurationUpdateNotifier update_notifier_;
 
-  std::unordered_map<std::string, std::unique_ptr<IonBuffer>> named_buffers_;
+  std::unordered_map<DvrGlobalBufferKey, std::unique_ptr<IonBuffer>>
+      global_buffers_;
 
   DisplayService(const DisplayService&) = delete;
   void operator=(const DisplayService&) = delete;

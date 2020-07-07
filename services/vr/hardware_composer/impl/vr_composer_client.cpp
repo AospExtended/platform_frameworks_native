@@ -19,6 +19,8 @@
 #include <hardware/gralloc1.h>
 #include <log/log.h>
 
+#include <memory>
+
 #include "impl/vr_hwc.h"
 #include "impl/vr_composer_client.h"
 
@@ -29,42 +31,47 @@ using android::hardware::graphics::common::V1_0::PixelFormat;
 using android::frameworks::vr::composer::V1_0::IVrComposerClient;
 
 VrComposerClient::VrComposerClient(dvr::VrHwc& hal)
-    : ComposerClient(hal), mVrHal(hal) {}
+    : ComposerClient(&hal), mVrHal(hal) {
+  if (!init()) {
+      LOG_ALWAYS_FATAL("failed to initialize VrComposerClient");
+  }
+}
 
 VrComposerClient::~VrComposerClient() {}
 
-std::unique_ptr<ComposerClient::CommandReader>
-VrComposerClient::createCommandReader() {
-  return std::unique_ptr<CommandReader>(new VrCommandReader(*this));
+std::unique_ptr<ComposerCommandEngine>
+VrComposerClient::createCommandEngine() {
+  return std::make_unique<VrCommandEngine>(*this);
 }
 
-VrComposerClient::VrCommandReader::VrCommandReader(VrComposerClient& client)
-    : CommandReader(client), mVrClient(client), mVrHal(client.mVrHal) {}
+VrComposerClient::VrCommandEngine::VrCommandEngine(VrComposerClient& client)
+    : ComposerCommandEngine(client.mHal, client.mResources.get()),
+      mVrHal(client.mVrHal) {}
 
-VrComposerClient::VrCommandReader::~VrCommandReader() {}
+VrComposerClient::VrCommandEngine::~VrCommandEngine() {}
 
-bool VrComposerClient::VrCommandReader::parseCommand(
+bool VrComposerClient::VrCommandEngine::executeCommand(
     IComposerClient::Command command, uint16_t length) {
   IVrComposerClient::VrCommand vrCommand =
       static_cast<IVrComposerClient::VrCommand>(command);
   switch (vrCommand) {
     case IVrComposerClient::VrCommand::SET_LAYER_INFO:
-      return parseSetLayerInfo(length);
+      return executeSetLayerInfo(length);
     case IVrComposerClient::VrCommand::SET_CLIENT_TARGET_METADATA:
-      return parseSetClientTargetMetadata(length);
+      return executeSetClientTargetMetadata(length);
     case IVrComposerClient::VrCommand::SET_LAYER_BUFFER_METADATA:
-      return parseSetLayerBufferMetadata(length);
+      return executeSetLayerBufferMetadata(length);
     default:
-      return CommandReader::parseCommand(command, length);
+      return ComposerCommandEngine::executeCommand(command, length);
   }
 }
 
-bool VrComposerClient::VrCommandReader::parseSetLayerInfo(uint16_t length) {
+bool VrComposerClient::VrCommandEngine::executeSetLayerInfo(uint16_t length) {
   if (length != 2) {
     return false;
   }
 
-  auto err = mVrHal.setLayerInfo(mDisplay, mLayer, read(), read());
+  auto err = mVrHal.setLayerInfo(mCurrentDisplay, mCurrentLayer, read(), read());
   if (err != Error::NONE) {
     mWriter.setError(getCommandLoc(), err);
   }
@@ -72,24 +79,24 @@ bool VrComposerClient::VrCommandReader::parseSetLayerInfo(uint16_t length) {
   return true;
 }
 
-bool VrComposerClient::VrCommandReader::parseSetClientTargetMetadata(
+bool VrComposerClient::VrCommandEngine::executeSetClientTargetMetadata(
     uint16_t length) {
   if (length != 7)
     return false;
 
-  auto err = mVrHal.setClientTargetMetadata(mDisplay, readBufferMetadata());
+  auto err = mVrHal.setClientTargetMetadata(mCurrentDisplay, readBufferMetadata());
   if (err != Error::NONE)
     mWriter.setError(getCommandLoc(), err);
 
   return true;
 }
 
-bool VrComposerClient::VrCommandReader::parseSetLayerBufferMetadata(
+bool VrComposerClient::VrCommandEngine::executeSetLayerBufferMetadata(
     uint16_t length) {
   if (length != 7)
     return false;
 
-  auto err = mVrHal.setLayerBufferMetadata(mDisplay, mLayer,
+  auto err = mVrHal.setLayerBufferMetadata(mCurrentDisplay, mCurrentLayer,
                                            readBufferMetadata());
   if (err != Error::NONE)
     mWriter.setError(getCommandLoc(), err);
@@ -98,7 +105,7 @@ bool VrComposerClient::VrCommandReader::parseSetLayerBufferMetadata(
 }
 
 IVrComposerClient::BufferMetadata
-VrComposerClient::VrCommandReader::readBufferMetadata() {
+VrComposerClient::VrCommandEngine::readBufferMetadata() {
   IVrComposerClient::BufferMetadata metadata = {
     .width = read(),
     .height = read(),

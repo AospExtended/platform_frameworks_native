@@ -10,10 +10,10 @@
 #include <memory>
 #include <sstream>
 
+#include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 
 #include "stdio_filebuf.h"
-#include "string_trim.h"
 
 namespace {
 
@@ -48,15 +48,18 @@ Task::Task(pid_t task_id)
       thread_count_(0),
       cpus_allowed_mask_(0) {
   task_fd_ = OpenTaskDirectory(task_id_);
-  ALOGE_IF(task_fd_.get() < 0,
+  const int error = errno;
+  ALOGE_IF(task_fd_.get() < 0 && error != EACCES,
            "Task::Task: Failed to open task directory for task_id=%d: %s",
-           task_id, strerror(errno));
+           task_id, strerror(error));
 
-  ReadStatusFields();
-
-  ALOGD_IF(TRACE, "Task::Task: task_id=%d name=%s tgid=%d ppid=%d cpu_mask=%x",
-           task_id_, name_.c_str(), thread_group_id_, parent_process_id_,
-           cpus_allowed_mask_);
+  if (IsValid()) {
+    ReadStatusFields();
+    ALOGD_IF(TRACE,
+             "Task::Task: task_id=%d name=%s tgid=%d ppid=%d cpu_mask=%x",
+             task_id_, name_.c_str(), thread_group_id_, parent_process_id_,
+             cpus_allowed_mask_);
+  }
 }
 
 base::unique_fd Task::OpenTaskFile(const std::string& name) const {
@@ -99,7 +102,7 @@ std::string Task::GetStatusField(const std::string& field) const {
 
       // The status file has lines with the format <field>:<value>. Extract the
       // value after the colon.
-      return Trim(line.substr(offset + field.size() + 1));
+      return android::base::Trim(line.substr(offset + field.size() + 1));
     }
   }
 
@@ -112,7 +115,7 @@ void Task::ReadStatusFields() {
     std::istream file_stream(&filebuf);
 
     for (std::string line; std::getline(file_stream, line);) {
-      auto offset = line.find(":");
+      auto offset = line.find(':');
       if (offset == std::string::npos) {
         ALOGW("ReadStatusFields: Failed to find delimiter \":\" in line=\"%s\"",
               line.c_str());
@@ -120,7 +123,7 @@ void Task::ReadStatusFields() {
       }
 
       std::string key = line.substr(0, offset);
-      std::string value = Trim(line.substr(offset + 1));
+      std::string value = android::base::Trim(line.substr(offset + 1));
 
       ALOGD_IF(TRACE, "Task::ReadStatusFields: key=\"%s\" value=\"%s\"",
                key.c_str(), value.c_str());
@@ -153,7 +156,7 @@ std::string Task::GetCpuSetPath() const {
     std::string line = "";
     std::getline(file_stream, line);
 
-    return Trim(line);
+    return android::base::Trim(line);
   } else {
     return "";
   }

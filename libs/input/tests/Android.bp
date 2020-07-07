@@ -1,11 +1,20 @@
 // Build the unit tests.
 cc_test {
     name: "libinput_tests",
-    test_per_src: true,
     srcs: [
         "InputChannel_test.cpp",
+        "InputDevice_test.cpp",
         "InputEvent_test.cpp",
         "InputPublisherAndConsumer_test.cpp",
+        "InputWindow_test.cpp",
+        "TouchVideoFrame_test.cpp",
+        "VelocityTracker_test.cpp",
+    ],
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unused-variable",
     ],
     shared_libs: [
         "libinput",
@@ -13,6 +22,7 @@ cc_test {
         "libutils",
         "libbinder",
         "libui",
+        "libbase",
     ]
 }
 
@@ -24,5 +34,16 @@ cc_library_static {
     srcs: ["StructLayout_test.cpp"],
     cflags: [
         "-O0",
+        "-Wall",
+        "-Werror",
+        "-Wextra",
     ],
+    shared_libs: [
+        "libinput",
+        "libcutils",
+        "libutils",
+        "libbinder",
+        "libui",
+        "libbase",
+    ]
 }

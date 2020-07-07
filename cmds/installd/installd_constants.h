@@ -31,7 +31,7 @@ constexpr const char* SECONDARY_USER_PREFIX = "user/";
 constexpr const char* DALVIK_CACHE_POSTFIX = "@classes.dex";
 
 constexpr size_t PKG_NAME_MAX = 128u;   /* largest allowed package name */
-constexpr size_t PKG_PATH_MAX = 256u;   /* max size of any path we use */
+constexpr size_t PKG_PATH_MAX = 1024u;  /* max size of any path we use */
 
 /****************************************************************************
  * IMPORTANT: These values are passed from Java code. Keep them in sync with
@@ -49,6 +49,12 @@ constexpr int DEXOPT_SECONDARY_DEX  = 1 << 5;
 constexpr int DEXOPT_FORCE          = 1 << 6;
 constexpr int DEXOPT_STORAGE_CE     = 1 << 7;
 constexpr int DEXOPT_STORAGE_DE     = 1 << 8;
+// Tells the compiler that it is invoked from the background service.  This
+// controls whether extra debugging flags can be used (taking more compile time.)
+constexpr int DEXOPT_IDLE_BACKGROUND_JOB = 1 << 9;
+constexpr int DEXOPT_ENABLE_HIDDEN_API_CHECKS = 1 << 10;
+constexpr int DEXOPT_GENERATE_COMPACT_DEX = 1 << 11;
+constexpr int DEXOPT_GENERATE_APP_IMAGE = 1 << 12;
 
 /* all known values for dexopt flags */
 constexpr int DEXOPT_MASK =
@@ -59,7 +65,11 @@ constexpr int DEXOPT_MASK =
     | DEXOPT_SECONDARY_DEX
     | DEXOPT_FORCE
     | DEXOPT_STORAGE_CE
-    | DEXOPT_STORAGE_DE;
+    | DEXOPT_STORAGE_DE
+    | DEXOPT_IDLE_BACKGROUND_JOB
+    | DEXOPT_ENABLE_HIDDEN_API_CHECKS
+    | DEXOPT_GENERATE_COMPACT_DEX
+    | DEXOPT_GENERATE_APP_IMAGE;
 
 // NOTE: keep in sync with StorageManager
 constexpr int FLAG_STORAGE_DE = 1 << 0;

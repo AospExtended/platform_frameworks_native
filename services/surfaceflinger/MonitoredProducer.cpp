@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-#include "MessageQueue.h"
 #include "MonitoredProducer.h"
-#include "SurfaceFlinger.h"
 #include "Layer.h"
+#include "SurfaceFlinger.h"
+
+#include "Scheduler/MessageQueue.h"
 
 namespace android {
 
@@ -33,26 +34,13 @@ MonitoredProducer::~MonitoredProducer() {
     // because we don't know where this destructor is called from. It could be
     // called with the mStateLock held, leading to a dead-lock (it actually
     // happens).
-    class MessageCleanUpList : public MessageBase {
-    public:
-        MessageCleanUpList(const sp<SurfaceFlinger>& flinger,
-                const wp<IBinder>& producer)
-            : mFlinger(flinger), mProducer(producer) {}
+    sp<LambdaMessage> cleanUpListMessage =
+            new LambdaMessage([flinger = mFlinger, asBinder = wp<IBinder>(onAsBinder())]() {
+                Mutex::Autolock lock(flinger->mStateLock);
+                flinger->mGraphicBufferProducerList.erase(asBinder);
+            });
 
-        virtual ~MessageCleanUpList() {}
-
-        virtual bool handler() {
-            Mutex::Autolock _l(mFlinger->mStateLock);
-            mFlinger->mGraphicBufferProducerList.remove(mProducer);
-            return true;
-        }
-
-    private:
-        sp<SurfaceFlinger> mFlinger;
-        wp<IBinder> mProducer;
-    };
-
-    mFlinger->postMessageAsync(new MessageCleanUpList(mFlinger, asBinder(mProducer)));
+    mFlinger->postMessageAsync(cleanUpListMessage);
 }
 
 status_t MonitoredProducer::requestBuffer(int slot, sp<GraphicBuffer>* buf) {
@@ -68,11 +56,11 @@ status_t MonitoredProducer::setAsyncMode(bool async) {
     return mProducer->setAsyncMode(async);
 }
 
-status_t MonitoredProducer::dequeueBuffer(int* slot, sp<Fence>* fence,
-        uint32_t w, uint32_t h, PixelFormat format, uint32_t usage,
-        FrameEventHistoryDelta* outTimestamps) {
-    return mProducer->dequeueBuffer(
-            slot, fence, w, h, format, usage, outTimestamps);
+status_t MonitoredProducer::dequeueBuffer(int* slot, sp<Fence>* fence, uint32_t w, uint32_t h,
+                                          PixelFormat format, uint64_t usage,
+                                          uint64_t* outBufferAge,
+                                          FrameEventHistoryDelta* outTimestamps) {
+    return mProducer->dequeueBuffer(slot, fence, w, h, format, usage, outBufferAge, outTimestamps);
 }
 
 status_t MonitoredProducer::detachBuffer(int slot) {
@@ -116,7 +104,7 @@ status_t MonitoredProducer::setSidebandStream(const sp<NativeHandle>& stream) {
 }
 
 void MonitoredProducer::allocateBuffers(uint32_t width, uint32_t height,
-        PixelFormat format, uint32_t usage) {
+        PixelFormat format, uint64_t usage) {
     mProducer->allocateBuffers(width, height, format, usage);
 }
 
@@ -144,6 +132,10 @@ status_t MonitoredProducer::setDequeueTimeout(nsecs_t timeout) {
     return mProducer->setDequeueTimeout(timeout);
 }
 
+status_t MonitoredProducer::setLegacyBufferDrop(bool drop) {
+    return mProducer->setLegacyBufferDrop(drop);
+}
+
 status_t MonitoredProducer::getLastQueuedBuffer(sp<GraphicBuffer>* outBuffer,
         sp<Fence>* outFence, float outTransformMatrix[16]) {
     return mProducer->getLastQueuedBuffer(outBuffer, outFence,
@@ -156,6 +148,10 @@ void MonitoredProducer::getFrameTimestamps(FrameEventHistoryDelta* outDelta) {
 
 status_t MonitoredProducer::getUniqueId(uint64_t* outId) const {
     return mProducer->getUniqueId(outId);
+}
+
+status_t MonitoredProducer::getConsumerUsage(uint64_t* outUsage) const {
+    return mProducer->getConsumerUsage(outUsage);
 }
 
 IBinder* MonitoredProducer::onAsBinder() {

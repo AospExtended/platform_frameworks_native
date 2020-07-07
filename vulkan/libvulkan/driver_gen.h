@@ -45,8 +45,11 @@ struct ProcHook {
         KHR_swapchain,
         KHR_get_surface_capabilities2,
         KHR_get_physical_device_properties2,
+        ANDROID_external_memory_android_hardware_buffer,
+        KHR_bind_memory2,
 
-        EXTENSION_CORE,  // valid bit
+        EXTENSION_CORE_1_0,
+        EXTENSION_CORE_1_1,
         EXTENSION_COUNT,
         EXTENSION_UNKNOWN,
     };
@@ -67,6 +70,8 @@ struct InstanceDriverTable {
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
     PFN_vkCreateDevice CreateDevice;
     PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
+    PFN_vkEnumeratePhysicalDeviceGroups EnumeratePhysicalDeviceGroups;
+    PFN_vkGetPhysicalDeviceProperties2 GetPhysicalDeviceProperties2;
     PFN_vkCreateDebugReportCallbackEXT CreateDebugReportCallbackEXT;
     PFN_vkDestroyDebugReportCallbackEXT DestroyDebugReportCallbackEXT;
     PFN_vkDebugReportMessageEXT DebugReportMessageEXT;
@@ -82,10 +87,13 @@ struct DeviceDriverTable {
     PFN_vkCreateImage CreateImage;
     PFN_vkDestroyImage DestroyImage;
     PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
+    PFN_vkBindImageMemory2 BindImageMemory2;
+    PFN_vkGetDeviceQueue2 GetDeviceQueue2;
     PFN_vkGetSwapchainGrallocUsageANDROID GetSwapchainGrallocUsageANDROID;
     PFN_vkGetSwapchainGrallocUsage2ANDROID GetSwapchainGrallocUsage2ANDROID;
     PFN_vkAcquireImageANDROID AcquireImageANDROID;
     PFN_vkQueueSignalReleaseImageANDROID QueueSignalReleaseImageANDROID;
+    PFN_vkBindImageMemory2KHR BindImageMemory2KHR;
     // clang-format on
 };
 

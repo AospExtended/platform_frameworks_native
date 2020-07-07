@@ -190,7 +190,7 @@ const bool yuvTexSameUV = false;
 static sp<GraphicBuffer> yuvTexBuffer;
 static GLuint yuvTex;
 
-bool setupYuvTexSurface(EGLDisplay dpy, EGLContext context) {
+bool setupYuvTexSurface(EGLDisplay dpy, EGLContext /*context*/) {
     int blockWidth = yuvTexWidth > 16 ? yuvTexWidth / 16 : 1;
     int blockHeight = yuvTexHeight > 16 ? yuvTexHeight / 16 : 1;
     yuvTexBuffer = new GraphicBuffer(yuvTexWidth, yuvTexHeight, yuvTexFormat,
@@ -331,7 +331,7 @@ void printEGLConfiguration(EGLDisplay dpy, EGLConfig config) {
     printf("\n");
 }
 
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
     EGLBoolean returnValue;
     EGLConfig myConfig = {0};
 
@@ -399,7 +399,6 @@ int main(int argc, char** argv) {
     checkEglError("eglQuerySurface");
     eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
     checkEglError("eglQuerySurface");
-    GLint dim = w < h ? w : h;
 
     fprintf(stderr, "Window dimensions: %d x %d\n", w, h);
 

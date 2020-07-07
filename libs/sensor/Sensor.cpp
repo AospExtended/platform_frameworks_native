@@ -22,6 +22,13 @@
 #include <binder/IPermissionController.h>
 #include <binder/IServiceManager.h>
 
+/*
+ * The permission to use for activity recognition sensors (like step counter).
+ * See sensor types for more details on what sensors should require this
+ * permission.
+ */
+#define SENSOR_PERMISSION_ACTIVITY_RECOGNITION "android.permission.ACTIVITY_RECOGNITION"
+
 // ----------------------------------------------------------------------------
 namespace android {
 // ----------------------------------------------------------------------------
@@ -30,7 +37,7 @@ Sensor::Sensor(const char * name) :
         mName(name), mHandle(0), mType(0),
         mMinValue(0), mMaxValue(0), mResolution(0),
         mPower(0), mMinDelay(0), mVersion(0), mFifoReservedEventCount(0),
-        mFifoMaxEventCount(0), mRequiredAppOp(0),
+        mFifoMaxEventCount(0), mRequiredAppOp(-1),
         mMaxDelay(0), mFlags(0) {
 }
 
@@ -38,7 +45,8 @@ Sensor::Sensor(struct sensor_t const* hwSensor, int halVersion) :
         Sensor(*hwSensor, uuid_t(), halVersion) {
 }
 
-Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersion) {
+Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersion) :
+        Sensor("") {
     mName = hwSensor.name;
     mVendor = hwSensor.vendor;
     mVersion = hwSensor.version;
@@ -115,7 +123,7 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
         mStringType = SENSOR_STRING_TYPE_HEART_RATE;
         mRequiredPermission = SENSOR_PERMISSION_BODY_SENSORS;
         AppOpsManager appOps;
-        mRequiredAppOp = appOps.permissionToOpCode(String16(SENSOR_PERMISSION_BODY_SENSORS));
+        mRequiredAppOp = appOps.permissionToOpCode(String16(mRequiredPermission));
         mFlags |= SENSOR_FLAG_ON_CHANGE_MODE;
         } break;
     case SENSOR_TYPE_LIGHT:
@@ -164,14 +172,22 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
             mFlags |= SENSOR_FLAG_WAKE_UP;
         }
         break;
-    case SENSOR_TYPE_STEP_COUNTER:
+    case SENSOR_TYPE_STEP_COUNTER: {
         mStringType = SENSOR_STRING_TYPE_STEP_COUNTER;
+        mRequiredPermission = SENSOR_PERMISSION_ACTIVITY_RECOGNITION;
+        AppOpsManager appOps;
+        mRequiredAppOp =
+                appOps.permissionToOpCode(String16(mRequiredPermission));
         mFlags |= SENSOR_FLAG_ON_CHANGE_MODE;
-        break;
-    case SENSOR_TYPE_STEP_DETECTOR:
+        } break;
+    case SENSOR_TYPE_STEP_DETECTOR: {
         mStringType = SENSOR_STRING_TYPE_STEP_DETECTOR;
+        mRequiredPermission = SENSOR_PERMISSION_ACTIVITY_RECOGNITION;
+        AppOpsManager appOps;
+        mRequiredAppOp =
+                appOps.permissionToOpCode(String16(mRequiredPermission));
         mFlags |= SENSOR_FLAG_SPECIAL_REPORTING_MODE;
-        break;
+        } break;
     case SENSOR_TYPE_TEMPERATURE:
         mStringType = SENSOR_STRING_TYPE_TEMPERATURE;
         mFlags |= SENSOR_FLAG_ON_CHANGE_MODE;
@@ -317,7 +333,7 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
         // If the sensor is protected by a permission we need to know if it is
         // a runtime one to determine whether we can use the permission cache.
         sp<IBinder> binder = defaultServiceManager()->getService(String16("permission"));
-        if (binder != 0) {
+        if (binder != nullptr) {
             sp<IPermissionController> permCtrl = interface_cast<IPermissionController>(binder);
             mRequiredPermissionRuntime = permCtrl->isRuntimePermission(
                     String16(mRequiredPermission));
@@ -410,6 +426,10 @@ bool Sensor::isWakeUpSensor() const {
 
 bool Sensor::isDynamicSensor() const {
     return (mFlags & SENSOR_FLAG_DYNAMIC_SENSOR) != 0;
+}
+
+bool Sensor::isDataInjectionSupported() const {
+    return (mFlags & SENSOR_FLAG_DATA_INJECTION) != 0;
 }
 
 bool Sensor::hasAdditionalInfo() const {
@@ -557,7 +577,8 @@ void Sensor::flattenString8(void*& buffer, size_t& size,
     uint32_t len = static_cast<uint32_t>(string8.length());
     FlattenableUtils::write(buffer, size, len);
     memcpy(static_cast<char*>(buffer), string8.string(), len);
-    FlattenableUtils::advance(buffer, size, FlattenableUtils::align<4>(len));
+    FlattenableUtils::advance(buffer, size, len);
+    size -= FlattenableUtils::align<4>(buffer);
 }
 
 bool Sensor::unflattenString8(void const*& buffer, size_t& size, String8& outputString8) {

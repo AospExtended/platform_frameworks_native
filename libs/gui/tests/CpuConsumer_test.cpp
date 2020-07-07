@@ -33,6 +33,8 @@
 #include <utils/Mutex.h>
 #include <utils/Condition.h>
 
+#include <thread>
+#include <vector>
 #define CPU_CONSUMER_TEST_FORMAT_RAW 0
 #define CPU_CONSUMER_TEST_FORMAT_Y8 0
 #define CPU_CONSUMER_TEST_FORMAT_Y16 0
@@ -309,8 +311,6 @@ void checkGreyscaleBuffer(const CpuConsumer::LockedBuffer &buf) {
     uint32_t h = buf.height;
     const int blockWidth = w > 16 ? w / 16 : 1;
     const int blockHeight = h > 16 ? h / 16 : 1;
-    const int blockRows = h / blockHeight;
-    const int blockCols = w / blockWidth;
 
     // Top-left square is bright
     checkPixel(buf, 0, 0, 191);
@@ -348,8 +348,6 @@ void checkRgba8888Buffer(const CpuConsumer::LockedBuffer &buf) {
     uint32_t h = buf.height;
     const int blockWidth = w > 16 ? w / 16 : 1;
     const int blockHeight = h > 16 ? h / 16 : 1;
-    const int blockRows = h / blockHeight;
-    const int blockCols = w / blockWidth;
 
     // Top-left square is bright red
     checkPixel(buf, 0, 0, 191, 63, 63);
@@ -391,8 +389,6 @@ void checkBayerRawBuffer(const CpuConsumer::LockedBuffer &buf) {
     uint32_t h = buf.height;
     const int blockWidth = (w > 16 ? w / 8 : 2) & ~0x1;
     const int blockHeight = (h > 16 ? h / 8 : 2) & ~0x1;
-    const int blockRows = h / blockHeight;
-    const int blockCols = w / blockWidth;
 
     // Top-left square is red
     checkPixel(buf, 0, 0, 1000, 200, 200);
@@ -488,12 +484,12 @@ void produceOneFrame(const sp<ANativeWindow>& anw,
     err = native_window_dequeue_buffer_and_wait(anw.get(), &anb);
     ASSERT_NO_ERROR(err, "dequeueBuffer error: ");
 
-    ASSERT_TRUE(anb != NULL);
+    ASSERT_TRUE(anb != nullptr);
 
     sp<GraphicBuffer> buf(GraphicBuffer::from(anb));
 
     *stride = buf->getStride();
-    uint8_t* img = NULL;
+    uint8_t* img = nullptr;
 
     ALOGVV("Lock buffer from %p for write", anw.get());
     err = buf->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, (void**)(&img));
@@ -558,7 +554,7 @@ TEST_P(CpuConsumerTest, FromCpuSingle) {
     err = mCC->lockNextBuffer(&b);
     ASSERT_NO_ERROR(err, "getNextBuffer error: ");
 
-    ASSERT_TRUE(b.data != NULL);
+    ASSERT_TRUE(b.data != nullptr);
     EXPECT_EQ(params.width,  b.width);
     EXPECT_EQ(params.height, b.height);
     EXPECT_EQ(params.format, b.format);
@@ -599,7 +595,7 @@ TEST_P(CpuConsumerTest, FromCpuManyInQueue) {
         err = mCC->lockNextBuffer(&b);
         ASSERT_NO_ERROR(err, "getNextBuffer error: ");
 
-        ASSERT_TRUE(b.data != NULL);
+        ASSERT_TRUE(b.data != nullptr);
         EXPECT_EQ(params.width,  b.width);
         EXPECT_EQ(params.height, b.height);
         EXPECT_EQ(params.format, b.format);
@@ -635,13 +631,13 @@ TEST_P(CpuConsumerTest, FromCpuLockMax) {
 
     // Consume
 
-    CpuConsumer::LockedBuffer *b = new CpuConsumer::LockedBuffer[params.maxLockedBuffers];
+    std::vector<CpuConsumer::LockedBuffer> b(params.maxLockedBuffers);
     for (int i = 0; i < params.maxLockedBuffers; i++) {
         ALOGV("Locking frame %d", i);
         err = mCC->lockNextBuffer(&b[i]);
         ASSERT_NO_ERROR(err, "getNextBuffer error: ");
 
-        ASSERT_TRUE(b[i].data != NULL);
+        ASSERT_TRUE(b[i].data != nullptr);
         EXPECT_EQ(params.width,  b[i].width);
         EXPECT_EQ(params.height, b[i].height);
         EXPECT_EQ(params.format, b[i].format);
@@ -664,7 +660,7 @@ TEST_P(CpuConsumerTest, FromCpuLockMax) {
     err = mCC->lockNextBuffer(&bTooMuch);
     ASSERT_NO_ERROR(err, "Did not allow new lock after unlock");
 
-    ASSERT_TRUE(bTooMuch.data != NULL);
+    ASSERT_TRUE(bTooMuch.data != nullptr);
     EXPECT_EQ(params.width,  bTooMuch.width);
     EXPECT_EQ(params.height, bTooMuch.height);
     EXPECT_EQ(params.format, bTooMuch.format);
@@ -684,9 +680,70 @@ TEST_P(CpuConsumerTest, FromCpuLockMax) {
     for (int i = 1; i < params.maxLockedBuffers; i++) {
         mCC->unlockBuffer(b[i]);
     }
+}
 
-    delete[] b;
+TEST_P(CpuConsumerTest, FromCpuInvalid) {
+    status_t err = mCC->lockNextBuffer(nullptr);
+    ASSERT_EQ(BAD_VALUE, err) << "lockNextBuffer did not fail";
 
+    CpuConsumer::LockedBuffer b;
+    err = mCC->unlockBuffer(b);
+    ASSERT_EQ(BAD_VALUE, err) << "unlockBuffer did not fail";
+}
+
+TEST_P(CpuConsumerTest, FromCpuMultiThread) {
+    CpuConsumerTestParams params = GetParam();
+    ASSERT_NO_FATAL_FAILURE(configureANW(mANW, params, params.maxLockedBuffers + 1));
+
+    for (int i = 0; i < 10; i++) {
+        std::atomic<int> threadReadyCount(0);
+        auto lockAndUnlock = [&]() {
+            threadReadyCount++;
+            // busy wait
+            while (threadReadyCount < params.maxLockedBuffers + 1);
+
+            CpuConsumer::LockedBuffer b;
+            status_t err = mCC->lockNextBuffer(&b);
+            if (err == NO_ERROR) {
+                usleep(1000);
+                err = mCC->unlockBuffer(b);
+                ASSERT_NO_ERROR(err, "Could not unlock buffer: ");
+            } else if (err == NOT_ENOUGH_DATA) {
+                // there are params.maxLockedBuffers+1 threads so one of the
+                // threads might get this error
+            } else {
+                FAIL() << "Could not lock buffer";
+            }
+        };
+
+        // produce buffers
+        for (int j = 0; j < params.maxLockedBuffers + 1; j++) {
+            const int64_t time = 1234L;
+            uint32_t stride;
+            ASSERT_NO_FATAL_FAILURE(produceOneFrame(mANW, params, time, &stride));
+        }
+
+        // spawn threads
+        std::vector<std::thread> threads;
+        for (int j = 0; j < params.maxLockedBuffers + 1; j++) {
+            threads.push_back(std::thread(lockAndUnlock));
+        }
+
+        // join threads
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        // we produced N+1 buffers, but the threads might only consume N
+        CpuConsumer::LockedBuffer b;
+        if (mCC->lockNextBuffer(&b) == NO_ERROR) {
+            mCC->unlockBuffer(b);
+        }
+
+        if (HasFatalFailure()) {
+            break;
+        }
+    }
 }
 
 CpuConsumerTestParams y8TestSets[] = {

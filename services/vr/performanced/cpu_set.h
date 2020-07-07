@@ -5,11 +5,14 @@
 
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include <android-base/unique_fd.h>
+
+#include <pdx/status.h>
 
 #include "unique_file.h"
 
@@ -28,7 +31,7 @@ class CpuSet {
 
   std::string GetCpuList() const;
 
-  int AttachTask(pid_t task_id) const;
+  pdx::Status<void> AttachTask(pid_t task_id) const;
   std::vector<pid_t> GetTasks() const;
 
  private:
@@ -81,7 +84,7 @@ class CpuSetManager {
   // to shield the system from interference from unbound kernel threads.
   void MoveUnboundTasks(const std::string& target_set);
 
-  std::string DumpState() const;
+  void DumpState(std::ostringstream& stream) const;
 
   operator bool() const { return root_set_ != nullptr; }
 

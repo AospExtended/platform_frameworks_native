@@ -51,19 +51,30 @@ interface IInstalld {
             @nullable @utf8InCpp String outputPath, int dexFlags,
             @utf8InCpp String compilerFilter, @nullable @utf8InCpp String uuid,
             @nullable @utf8InCpp String sharedLibraries,
-            @nullable @utf8InCpp String seInfo);
+            @nullable @utf8InCpp String seInfo, boolean downgrade, int targetSdkVersion,
+            @nullable @utf8InCpp String profileName,
+            @nullable @utf8InCpp String dexMetadataPath,
+            @nullable @utf8InCpp String compilationReason);
+    boolean compileLayouts(@utf8InCpp String apkPath, @utf8InCpp String packageName,
+            @utf8InCpp String outDexFile, int uid);
 
     void rmdex(@utf8InCpp String codePath, @utf8InCpp String instructionSet);
 
-    boolean mergeProfiles(int uid, @utf8InCpp String packageName);
-    boolean dumpProfiles(int uid, @utf8InCpp String packageName, @utf8InCpp String codePaths);
-    void clearAppProfiles(@utf8InCpp String packageName);
+    boolean mergeProfiles(int uid, @utf8InCpp String packageName, @utf8InCpp String profileName);
+    boolean dumpProfiles(int uid, @utf8InCpp String packageName, @utf8InCpp String  profileName,
+            @utf8InCpp String codePath);
+    boolean copySystemProfile(@utf8InCpp String systemProfile, int uid,
+            @utf8InCpp String packageName, @utf8InCpp String profileName);
+    void clearAppProfiles(@utf8InCpp String packageName, @utf8InCpp String profileName);
     void destroyAppProfiles(@utf8InCpp String packageName);
+
+    boolean createProfileSnapshot(int appId, @utf8InCpp String packageName,
+            @utf8InCpp String profileName, @utf8InCpp String classpath);
+    void destroyProfileSnapshot(@utf8InCpp String packageName, @utf8InCpp String profileName);
 
     void idmap(@utf8InCpp String targetApkPath, @utf8InCpp String overlayApkPath, int uid);
     void removeIdmap(@utf8InCpp String overlayApkPath);
     void rmPackageDir(@utf8InCpp String packageDir);
-    void markBootComplete(@utf8InCpp String instructionSet);
     void freeCache(@nullable @utf8InCpp String uuid, long targetFreeBytes,
             long cacheReservedBytes, int flags);
     void linkNativeLibraryDirectory(@nullable @utf8InCpp String uuid,
@@ -75,11 +86,46 @@ interface IInstalld {
             @utf8InCpp String outputPath);
     void deleteOdex(@utf8InCpp String apkPath, @utf8InCpp String instructionSet,
             @nullable @utf8InCpp String outputPath);
+    void installApkVerity(@utf8InCpp String filePath, in FileDescriptor verityInput,
+            int contentSize);
+    void assertFsverityRootHashMatches(@utf8InCpp String filePath, in byte[] expectedHash);
 
     boolean reconcileSecondaryDexFile(@utf8InCpp String dexPath, @utf8InCpp String pkgName,
         int uid, in @utf8InCpp String[] isas, @nullable @utf8InCpp String volume_uuid,
         int storage_flag);
 
+    byte[] hashSecondaryDexFile(@utf8InCpp String dexPath, @utf8InCpp String pkgName,
+        int uid, @nullable @utf8InCpp String volumeUuid, int storageFlag);
+
     void invalidateMounts();
     boolean isQuotaSupported(@nullable @utf8InCpp String uuid);
+
+    boolean prepareAppProfile(@utf8InCpp String packageName,
+        int userId, int appId, @utf8InCpp String profileName, @utf8InCpp String codePath,
+        @nullable @utf8InCpp String dexMetadata);
+
+    long snapshotAppData(@nullable @utf8InCpp String uuid, in @utf8InCpp String packageName,
+            int userId, int snapshotId, int storageFlags);
+    void restoreAppDataSnapshot(@nullable @utf8InCpp String uuid, in @utf8InCpp String packageName,
+            int appId, @utf8InCpp String seInfo, int user, int snapshotId, int storageflags);
+    void destroyAppDataSnapshot(@nullable @utf8InCpp String uuid, @utf8InCpp String packageName,
+            int userId, long ceSnapshotInode, int snapshotId, int storageFlags);
+
+    void migrateLegacyObbData();
+
+    const int FLAG_STORAGE_DE = 0x1;
+    const int FLAG_STORAGE_CE = 0x2;
+    const int FLAG_STORAGE_EXTERNAL = 0x4;
+
+    const int FLAG_CLEAR_CACHE_ONLY = 0x10;
+    const int FLAG_CLEAR_CODE_CACHE_ONLY = 0x20;
+
+    const int FLAG_FREE_CACHE_V2 = 0x100;
+    const int FLAG_FREE_CACHE_V2_DEFY_QUOTA = 0x200;
+    const int FLAG_FREE_CACHE_NOOP = 0x400;
+
+    const int FLAG_USE_QUOTA = 0x1000;
+    const int FLAG_FORCE = 0x2000;
+
+    const int FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES = 0x20000;
 }

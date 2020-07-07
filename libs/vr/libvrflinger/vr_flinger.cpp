@@ -12,28 +12,26 @@
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <cutils/properties.h>
-#include <cutils/sched_policy.h>
 #include <log/log.h>
 #include <private/dvr/display_client.h>
+#include <processgroup/sched_policy.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
-
-#include <pdx/default_transport/service_dispatcher.h>
 
 #include <functional>
 
 #include "DisplayHardware/ComposerHal.h"
 #include "display_manager_service.h"
 #include "display_service.h"
-#include "vsync_service.h"
 
 namespace android {
 namespace dvr {
 
 std::unique_ptr<VrFlinger> VrFlinger::Create(
-    Hwc2::Composer* hidl, RequestDisplayCallback request_display_callback) {
+    Hwc2::Composer* hidl, hwc2_display_t primary_display_id,
+    RequestDisplayCallback request_display_callback) {
   std::unique_ptr<VrFlinger> vr_flinger(new VrFlinger);
-  if (vr_flinger->Init(hidl, request_display_callback))
+  if (vr_flinger->Init(hidl, primary_display_id, request_display_callback))
     return vr_flinger;
   else
     return nullptr;
@@ -58,6 +56,7 @@ VrFlinger::~VrFlinger() {
 }
 
 bool VrFlinger::Init(Hwc2::Composer* hidl,
+                     hwc2_display_t primary_display_id,
                      RequestDisplayCallback request_display_callback) {
   if (!hidl || !request_display_callback)
     return false;
@@ -66,9 +65,6 @@ bool VrFlinger::Init(Hwc2::Composer* hidl,
 
   ALOGI("Starting up VrFlinger...");
 
-  setpriority(PRIO_PROCESS, 0, android::PRIORITY_URGENT_DISPLAY);
-  set_sched_policy(0, SP_FOREGROUND);
-
   // We need to be able to create endpoints with full perms.
   umask(0000);
 
@@ -76,11 +72,11 @@ bool VrFlinger::Init(Hwc2::Composer* hidl,
 
   request_display_callback_ = request_display_callback;
 
-  dispatcher_ = android::pdx::default_transport::ServiceDispatcher::Create();
+  dispatcher_ = android::pdx::ServiceDispatcher::Create();
   CHECK_ERROR(!dispatcher_, error, "Failed to create service dispatcher.");
 
-  display_service_ =
-      android::dvr::DisplayService::Create(hidl, request_display_callback);
+  display_service_ = android::dvr::DisplayService::Create(
+      hidl, primary_display_id, request_display_callback);
   CHECK_ERROR(!display_service_, error, "Failed to create display service.");
   dispatcher_->AddService(display_service_);
 
@@ -88,19 +84,12 @@ bool VrFlinger::Init(Hwc2::Composer* hidl,
   CHECK_ERROR(!service, error, "Failed to create display manager service.");
   dispatcher_->AddService(service);
 
-  service = android::dvr::VSyncService::Create();
-  CHECK_ERROR(!service, error, "Failed to create vsync service.");
-  dispatcher_->AddService(service);
-
-  display_service_->SetVSyncCallback(
-      std::bind(&android::dvr::VSyncService::VSyncEvent,
-                std::static_pointer_cast<android::dvr::VSyncService>(service),
-                std::placeholders::_1, std::placeholders::_2,
-                std::placeholders::_3, std::placeholders::_4));
-
   dispatcher_thread_ = std::thread([this]() {
     prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("VrDispatch"), 0, 0, 0);
     ALOGI("Entering message loop.");
+
+    setpriority(PRIO_PROCESS, 0, android::PRIORITY_URGENT_DISPLAY);
+    set_sched_policy(0, SP_FOREGROUND);
 
     int ret = dispatcher_->EnterDispatchLoop();
     if (ret < 0) {
@@ -115,6 +104,7 @@ error:
 }
 
 void VrFlinger::OnBootFinished() {
+  display_service_->OnBootFinished();
   sp<IVrManager> vr_manager = interface_cast<IVrManager>(
       defaultServiceManager()->checkService(String16("vrmanager")));
   if (vr_manager.get()) {
@@ -135,8 +125,9 @@ void VrFlinger::SeizeDisplayOwnership() {
   display_service_->SeizeDisplayOwnership();
 }
 
-void VrFlinger::OnHardwareComposerRefresh() {
-  display_service_->OnHardwareComposerRefresh();
+std::string VrFlinger::Dump() {
+  // TODO(karthikrs): Add more state information here.
+  return display_service_->DumpState(0/*unused*/);
 }
 
 void VrFlinger::PersistentVrStateCallback::onPersistentVrStateChanged(
@@ -146,6 +137,5 @@ void VrFlinger::PersistentVrStateCallback::onPersistentVrStateChanged(
   // Persistent VR mode is not enough.
   // request_display_callback_(enabled);
 }
-
 }  // namespace dvr
 }  // namespace android

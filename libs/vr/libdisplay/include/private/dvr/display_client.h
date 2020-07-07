@@ -1,10 +1,10 @@
 #ifndef ANDROID_DVR_DISPLAY_CLIENT_H_
 #define ANDROID_DVR_DISPLAY_CLIENT_H_
 
+#include <dvr/dvr_api.h>
 #include <hardware/hwcomposer.h>
 #include <pdx/client.h>
 #include <pdx/file_handle.h>
-#include <private/dvr/buffer_hub_client.h>
 #include <private/dvr/buffer_hub_queue_client.h>
 #include <private/dvr/display_protocol.h>
 
@@ -36,7 +36,10 @@ class Surface : public pdx::ClientBase<Surface> {
   pdx::Status<void> SetAttributes(const SurfaceAttributes& attributes);
 
   // Creates an empty queue.
-  pdx::Status<std::unique_ptr<ProducerQueue>> CreateQueue();
+  pdx::Status<std::unique_ptr<ProducerQueue>> CreateQueue(uint32_t width,
+                                                          uint32_t height,
+                                                          uint32_t format,
+                                                          size_t metadata_size);
 
   // Creates a queue and populates it with |capacity| buffers of the specified
   // parameters.
@@ -45,7 +48,8 @@ class Surface : public pdx::ClientBase<Surface> {
                                                           uint32_t layer_count,
                                                           uint32_t format,
                                                           uint64_t usage,
-                                                          size_t capacity);
+                                                          size_t capacity,
+                                                          size_t metadata_size);
 
  private:
   friend BASE;
@@ -67,8 +71,12 @@ class Surface : public pdx::ClientBase<Surface> {
 class DisplayClient : public pdx::ClientBase<DisplayClient> {
  public:
   pdx::Status<Metrics> GetDisplayMetrics();
-  pdx::Status<std::unique_ptr<IonBuffer>> GetNamedBuffer(
-      const std::string& name);
+  pdx::Status<std::string> GetConfigurationData(ConfigFileType config_type);
+  pdx::Status<std::unique_ptr<IonBuffer>> SetupGlobalBuffer(
+      DvrGlobalBufferKey key, size_t size, uint64_t usage);
+  pdx::Status<void> DeleteGlobalBuffer(DvrGlobalBufferKey key);
+  pdx::Status<std::unique_ptr<IonBuffer>> GetGlobalBuffer(
+      DvrGlobalBufferKey key);
   pdx::Status<std::unique_ptr<Surface>> CreateSurface(
       const SurfaceAttributes& attributes);
 

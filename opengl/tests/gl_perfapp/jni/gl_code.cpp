@@ -1,17 +1,22 @@
 // OpenGL ES 2.0 code
 
-#include <nativehelper/jni.h>
+#include <jni.h>
 #define LOG_TAG "GLPerf gl_code.cpp"
-#include <utils/Log.h>
+#include <android/log.h>
+
+#define ALOG(priority, tag, ...) ((void)__android_log_print(ANDROID_##priority, tag, __VA_ARGS__))
+
+#define ALOGI(...) ALOG(LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define ALOGE(...) ALOG(LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
-#include <utils/Timers.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 
 #include "../../gl_perf/fill_common.cpp"
 
@@ -61,7 +66,7 @@ extern "C" {
     JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_step(JNIEnv * env, jobject obj);
 };
 
-JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_init(JNIEnv * env, jobject obj,  jint width, jint height)
+JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_init(JNIEnv * /*env*/, jobject /*obj*/,  jint width, jint height)
 {
     gWidth = width;
     gHeight = height;
@@ -87,7 +92,7 @@ JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_init(JNIEnv * env, jobj
     }
 }
 
-JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_step(JNIEnv * env, jobject obj)
+JNIEXPORT void JNICALL Java_com_android_glperf_GLPerfLib_step(JNIEnv * /*env*/, jobject /*obj*/)
 {
     if (! done) {
         if (stateClock > 0 && ((stateClock & 1) == 0)) {

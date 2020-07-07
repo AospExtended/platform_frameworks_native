@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include <limits>
+
 namespace android {
 // ----------------------------------------------------------------------------
 
@@ -79,7 +81,6 @@ public:
             int inside = spanner.next(current.top, current.bottom);
             spannerInner.prepare(inside);
             do {
-                TYPE left, right;
                 int inner_inside = spannerInner.next(current.left, current.right);
                 if ((op_mask >> inner_inside) & 1) {
                     if (current.left < current.right && 

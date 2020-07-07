@@ -17,11 +17,15 @@
 #ifndef ANDROID_SF_VIRTUAL_DISPLAY_SURFACE_H
 #define ANDROID_SF_VIRTUAL_DISPLAY_SURFACE_H
 
-#include "DisplaySurface.h"
-#include "HWComposerBufferCache.h"
+#include <optional>
+#include <string>
 
+#include <compositionengine/DisplaySurface.h>
+#include <compositionengine/impl/HwcBufferCache.h>
 #include <gui/ConsumerBase.h>
 #include <gui/IGraphicBufferProducer.h>
+
+#include "DisplayIdentification.h"
 
 // ---------------------------------------------------------------------------
 namespace android {
@@ -69,24 +73,20 @@ class IProducerListener;
  * the HWC output buffer. When HWC composition is complete, the scratch buffer
  * is released and the output buffer is queued to the sink.
  */
-class VirtualDisplaySurface : public DisplaySurface,
+class VirtualDisplaySurface : public compositionengine::DisplaySurface,
                               public BnGraphicBufferProducer,
                               private ConsumerBase {
 public:
-    VirtualDisplaySurface(HWComposer& hwc, int32_t dispId,
-            const sp<IGraphicBufferProducer>& sink,
-            const sp<IGraphicBufferProducer>& bqProducer,
-            const sp<IGraphicBufferConsumer>& bqConsumer,
-            const String8& name);
+    VirtualDisplaySurface(HWComposer& hwc, const std::optional<DisplayId>& displayId,
+                          const sp<IGraphicBufferProducer>& sink,
+                          const sp<IGraphicBufferProducer>& bqProducer,
+                          const sp<IGraphicBufferConsumer>& bqConsumer, const std::string& name);
 
     //
     // DisplaySurface interface
     //
     virtual status_t beginFrame(bool mustRecompose);
     virtual status_t prepareFrame(CompositionType compositionType);
-#ifndef USE_HWC2
-    virtual status_t compositionComplete();
-#endif
     virtual status_t advanceFrame();
     virtual void onFrameCommitted();
     virtual void dumpAsString(String8& result) const;
@@ -104,9 +104,9 @@ private:
     virtual status_t requestBuffer(int pslot, sp<GraphicBuffer>* outBuf);
     virtual status_t setMaxDequeuedBufferCount(int maxDequeuedBuffers);
     virtual status_t setAsyncMode(bool async);
-    virtual status_t dequeueBuffer(int* pslot, sp<Fence>* fence, uint32_t w,
-            uint32_t h, PixelFormat format, uint32_t usage,
-            FrameEventHistoryDelta *outTimestamps);
+    virtual status_t dequeueBuffer(int* pslot, sp<Fence>* fence, uint32_t w, uint32_t h,
+                                   PixelFormat format, uint64_t usage, uint64_t* outBufferAge,
+                                   FrameEventHistoryDelta* outTimestamps);
     virtual status_t detachBuffer(int slot);
     virtual status_t detachNextBuffer(sp<GraphicBuffer>* outBuffer,
             sp<Fence>* outFence);
@@ -120,7 +120,7 @@ private:
     virtual status_t disconnect(int api, DisconnectMode mode);
     virtual status_t setSidebandStream(const sp<NativeHandle>& stream);
     virtual void allocateBuffers(uint32_t width, uint32_t height,
-            PixelFormat format, uint32_t usage);
+            PixelFormat format, uint64_t usage);
     virtual status_t allowAllocation(bool allow);
     virtual status_t setGenerationNumber(uint32_t generationNumber);
     virtual String8 getConsumerName() const override;
@@ -130,12 +130,13 @@ private:
     virtual status_t getLastQueuedBuffer(sp<GraphicBuffer>* outBuffer,
             sp<Fence>* outFence, float outTransformMatrix[16]) override;
     virtual status_t getUniqueId(uint64_t* outId) const override;
+    virtual status_t getConsumerUsage(uint64_t* outUsage) const override;
 
     //
     // Utility methods
     //
     static Source fbSourceForCompositionType(CompositionType type);
-    status_t dequeueBuffer(Source source, PixelFormat format, uint32_t usage,
+    status_t dequeueBuffer(Source source, PixelFormat format, uint64_t usage,
             int* sslot, sp<Fence>* fence);
     void updateQueueBufferOutput(QueueBufferOutput&& qbo);
     void resetPerFrameState();
@@ -154,8 +155,8 @@ private:
     // Immutable after construction
     //
     HWComposer& mHwc;
-    const int32_t mDisplayId;
-    const String8 mDisplayName;
+    const std::optional<DisplayId> mDisplayId;
+    const std::string mDisplayName;
     sp<IGraphicBufferProducer> mSource[2]; // indexed by SOURCE_*
     uint32_t mDefaultOutputFormat;
 
@@ -168,7 +169,7 @@ private:
     // the composition type changes or the GLES driver starts requesting
     // different usage/format, we'll get a new buffer.
     uint32_t mOutputFormat;
-    uint32_t mOutputUsage;
+    uint64_t mOutputUsage;
 
     // Since we present a single producer interface to the GLES driver, but
     // are internally muxing between the sink and scratch producers, we have
@@ -252,10 +253,7 @@ private:
 
     bool mMustRecompose;
 
-#ifdef USE_HWC2
-    HWComposerBufferCache mHwcBufferCache;
-#endif
-
+    compositionengine::impl::HwcBufferCache mHwcBufferCache;
 
     bool mForceHwcCopy;
 };

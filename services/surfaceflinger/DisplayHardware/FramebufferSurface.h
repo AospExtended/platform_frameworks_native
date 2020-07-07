@@ -17,13 +17,14 @@
 #ifndef ANDROID_SF_FRAMEBUFFER_SURFACE_H
 #define ANDROID_SF_FRAMEBUFFER_SURFACE_H
 
-#include "DisplaySurface.h"
-#include "HWComposerBufferCache.h"
-
 #include <stdint.h>
 #include <sys/types.h>
 
+#include <compositionengine/DisplaySurface.h>
+#include <compositionengine/impl/HwcBufferCache.h>
 #include <gui/ConsumerBase.h>
+
+#include "DisplayIdentification.h"
 
 // ---------------------------------------------------------------------------
 namespace android {
@@ -35,32 +36,24 @@ class HWComposer;
 
 // ---------------------------------------------------------------------------
 
-class FramebufferSurface : public ConsumerBase,
-                           public DisplaySurface {
+class FramebufferSurface : public ConsumerBase, public compositionengine::DisplaySurface {
 public:
-    FramebufferSurface(HWComposer& hwc, int disp, const sp<IGraphicBufferConsumer>& consumer);
+    FramebufferSurface(HWComposer& hwc, DisplayId displayId,
+                       const sp<IGraphicBufferConsumer>& consumer);
 
     virtual status_t beginFrame(bool mustRecompose);
     virtual status_t prepareFrame(CompositionType compositionType);
-#ifndef USE_HWC2
-    virtual status_t compositionComplete();
-#endif
     virtual status_t advanceFrame();
     virtual void onFrameCommitted();
     virtual void dumpAsString(String8& result) const;
 
-    // Cannot resize a buffers in a FramebufferSurface. Only works with virtual
-    // displays.
-    virtual void resizeBuffers(const uint32_t /*w*/, const uint32_t /*h*/) { };
+    virtual void resizeBuffers(const uint32_t width, const uint32_t height);
 
     virtual const sp<Fence>& getClientTargetAcquireFence() const override;
 
 private:
     virtual ~FramebufferSurface() { }; // this class cannot be overloaded
 
-#ifndef USE_HWC2
-    virtual void onFrameAvailable(const BufferItem& item);
-#endif
     virtual void freeBufferLocked(int slotIndex);
 
     virtual void dumpLocked(String8& result, const char* prefix) const;
@@ -68,22 +61,24 @@ private:
     // nextBuffer waits for and then latches the next buffer from the
     // BufferQueue and releases the previously latched buffer to the
     // BufferQueue.  The new buffer is returned in the 'buffer' argument.
-#ifdef USE_HWC2
     status_t nextBuffer(uint32_t& outSlot, sp<GraphicBuffer>& outBuffer,
-            sp<Fence>& outFence, android_dataspace_t& outDataspace);
-#else
-    status_t nextBuffer(sp<GraphicBuffer>& outBuffer, sp<Fence>& outFence);
-#endif
+            sp<Fence>& outFence, ui::Dataspace& outDataspace);
 
-    // mDisplayType must match one of the HWC display types
-    int mDisplayType;
+    const DisplayId mDisplayId;
 
     // mCurrentBufferIndex is the slot index of the current buffer or
     // INVALID_BUFFER_SLOT to indicate that either there is no current buffer
     // or the buffer is not associated with a slot.
     int mCurrentBufferSlot;
 
-    // mCurrentBuffer is the current buffer or NULL to indicate that there is
+    // mDataSpace is the dataspace of the current composition buffer for
+    // this FramebufferSurface. It will be 0 when HWC is doing the
+    // compositing. Otherwise it will display the dataspace of the buffer
+    // use for compositing which can change as wide-color content is
+    // on/off.
+    ui::Dataspace mDataSpace;
+
+    // mCurrentBuffer is the current buffer or nullptr to indicate that there is
     // no current buffer.
     sp<GraphicBuffer> mCurrentBuffer;
 
@@ -93,14 +88,12 @@ private:
     // Hardware composer, owned by SurfaceFlinger.
     HWComposer& mHwc;
 
-#ifdef USE_HWC2
-    HWComposerBufferCache mHwcBufferCache;
+    compositionengine::impl::HwcBufferCache mHwcBufferCache;
 
     // Previous buffer to release after getting an updated retire fence
     bool mHasPendingRelease;
     int mPreviousBufferSlot;
     sp<GraphicBuffer> mPreviousBuffer;
-#endif
 };
 
 // ---------------------------------------------------------------------------

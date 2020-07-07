@@ -52,7 +52,7 @@ public:
             uint32_t size, int32_t type, int32_t format, const native_handle_t *resource) = 0;
 
     virtual int setOperationParameter(
-            int32_t type, const Vector<float> &floats, const Vector<int32_t> &ints) = 0;
+            int32_t handle, int32_t type, const Vector<float> &floats, const Vector<int32_t> &ints) = 0;
 };
 
 // ----------------------------------------------------------------------------
@@ -60,6 +60,9 @@ public:
 class BnSensorServer : public BnInterface<ISensorServer>
 {
 public:
+    virtual status_t shellCommand(int in, int out, int err,
+                                  Vector<String16>& args) = 0;
+
     virtual status_t    onTransact( uint32_t code,
                                     const Parcel& data,
                                     Parcel* reply,

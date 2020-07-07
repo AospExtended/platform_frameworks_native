@@ -284,8 +284,7 @@ class Layer {
 public:
 
     Layer() :
-        mFirstFrame(true),
-        mGLHelper(NULL),
+        mGLHelper(nullptr),
         mSurface(EGL_NO_SURFACE) {
     }
 
@@ -317,23 +316,23 @@ public:
     }
 
     void tearDown() {
-        if (mComposer != NULL) {
+        if (mComposer != nullptr) {
             mComposer->tearDown();
             delete mComposer;
-            mComposer = NULL;
+            mComposer = nullptr;
         }
 
-        if (mRenderer != NULL) {
+        if (mRenderer != nullptr) {
             mRenderer->tearDown();
             delete mRenderer;
-            mRenderer = NULL;
+            mRenderer = nullptr;
         }
 
         if (mSurface != EGL_NO_SURFACE) {
             mGLHelper->destroySurface(&mSurface);
             mGLConsumer->abandon();
         }
-        mGLHelper = NULL;
+        mGLHelper = nullptr;
         mGLConsumer.clear();
     }
 
@@ -358,8 +357,6 @@ public:
     }
 
 private:
-    bool mFirstFrame;
-
     LayerDesc mDesc;
 
     GLHelper* mGLHelper;
@@ -380,7 +377,7 @@ public:
         mDesc(desc),
         mInstance(instance),
         mNumLayers(countLayers(desc)),
-        mGLHelper(NULL),
+        mGLHelper(nullptr),
         mSurface(EGL_NO_SURFACE),
         mWindowSurface(EGL_NO_SURFACE) {
     }
@@ -389,7 +386,6 @@ public:
         ATRACE_CALL();
 
         bool result;
-        EGLint resulte;
 
         float scaleFactor = float(mDesc.runHeights[mInstance]) /
             float(mDesc.height);
@@ -447,7 +443,7 @@ public:
             mLayers[i].tearDown();
         }
 
-        if (mGLHelper != NULL) {
+        if (mGLHelper != nullptr) {
             if (mWindowSurface != EGL_NO_SURFACE) {
                 mGLHelper->destroySurface(&mWindowSurface);
             }
@@ -457,7 +453,7 @@ public:
             mSurfaceControl.clear();
             mGLHelper->tearDown();
             delete mGLHelper;
-            mGLHelper = NULL;
+            mGLHelper = nullptr;
         }
     }
 
@@ -465,7 +461,6 @@ public:
         ATRACE_CALL();
 
         bool result;
-        status_t err;
 
         resetColorGenerator();
 
@@ -558,7 +553,7 @@ private:
     static size_t countLayers(const BenchmarkDesc& desc) {
         size_t i;
         for (i = 0; i < MAX_NUM_LAYERS; i++) {
-            if (desc.layers[i].rendererFactory == NULL) {
+            if (desc.layers[i].rendererFactory == nullptr) {
                 break;
             }
         }

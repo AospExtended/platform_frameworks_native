@@ -1,6 +1,5 @@
 #include "pdx/client.h"
 
-#define LOG_TAG "ServiceFramework"
 #include <log/log.h>
 
 #include <pdx/trace.h>
@@ -117,6 +116,10 @@ int Client::event_fd() const {
 }
 
 LocalChannelHandle& Client::GetChannelHandle() {
+  return channel_->GetChannelHandle();
+}
+
+const LocalChannelHandle& Client::GetChannelHandle() const {
   return channel_->GetChannelHandle();
 }
 

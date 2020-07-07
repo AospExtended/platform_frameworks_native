@@ -67,9 +67,7 @@ struct InstanceData {
         : opaque_api_data(),
           allocator(alloc),
           driver(),
-          get_device_proc_addr(nullptr) {
-        hook_extensions.set(ProcHook::EXTENSION_CORE);
-    }
+          get_device_proc_addr(nullptr) {}
 
     api::InstanceData opaque_api_data;
 
@@ -89,9 +87,7 @@ struct DeviceData {
         : opaque_api_data(),
           allocator(alloc),
           debug_report_callbacks(debug_report_callbacks_),
-          driver() {
-        hook_extensions.set(ProcHook::EXTENSION_CORE);
-    }
+          driver() {}
 
     api::DeviceData opaque_api_data;
 
@@ -105,7 +101,6 @@ struct DeviceData {
     uint32_t driver_version;
 };
 
-bool Debuggable();
 bool OpenHAL();
 const VkAllocationCallbacks& GetDefaultAllocator();
 
@@ -126,7 +121,10 @@ VKAPI_ATTR VkResult CreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 VKAPI_ATTR void DestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator);
 
 VKAPI_ATTR VkResult EnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices);
+VKAPI_ATTR VkResult EnumeratePhysicalDeviceGroups(VkInstance instance, uint32_t* pPhysicalDeviceGroupCount, VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties);
+
 VKAPI_ATTR void GetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, VkQueue* pQueue);
+VKAPI_ATTR void GetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* pQueueInfo, VkQueue* pQueue);
 VKAPI_ATTR VkResult AllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo* pAllocateInfo, VkCommandBuffer* pCommandBuffers);
 // clang-format on
 

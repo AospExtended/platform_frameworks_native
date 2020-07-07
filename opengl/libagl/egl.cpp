@@ -56,6 +56,24 @@
 EGLBoolean EGLAPI eglSetSwapRectangleANDROID(EGLDisplay dpy, EGLSurface draw,
         EGLint left, EGLint top, EGLint width, EGLint height);
 
+
+typedef struct egl_native_pixmap_t
+{
+    int32_t     version;    /* must be 32 */
+    int32_t     width;
+    int32_t     height;
+    int32_t     stride;
+    uint8_t*    data;
+    uint8_t     format;
+    uint8_t     rfu[3];
+    union {
+        uint32_t    compressedFormat;
+        int32_t     vstride;
+    };
+    int32_t     reserved;
+} egl_native_pixmap_t;
+
+
 // ----------------------------------------------------------------------------
 namespace android {
 
@@ -63,7 +81,9 @@ namespace android {
 
 const unsigned int NUM_DISPLAYS = 1;
 
+#ifndef __ANDROID__
 static pthread_mutex_t gInitMutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static pthread_mutex_t gErrorKeyMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_key_t gEGLErrorKey = -1;
 #ifndef __ANDROID__
@@ -1758,7 +1778,6 @@ EGLBoolean eglMakeCurrent(  EGLDisplay dpy, EGLSurface draw,
         // if we're detaching, we need the current context
         current_ctx = (EGLContext)getGlThreadSpecific();
     } else {
-        egl_context_t* c = egl_context_t::context(ctx);
         egl_surface_t* d = (egl_surface_t*)draw;
         egl_surface_t* r = (egl_surface_t*)read;
         if ((d && d->ctx && d->ctx != ctx) ||

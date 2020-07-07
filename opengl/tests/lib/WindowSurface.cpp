@@ -34,8 +34,12 @@ WindowSurface::WindowSurface() {
     }
 
     // Get main display parameters.
-    sp<IBinder> mainDpy = SurfaceComposerClient::getBuiltInDisplay(
-            ISurfaceComposer::eDisplayIdMain);
+    const auto mainDpy = SurfaceComposerClient::getInternalDisplayToken();
+    if (mainDpy == nullptr) {
+        fprintf(stderr, "ERROR: no display\n");
+        return;
+    }
+
     DisplayInfo mainDpyInfo;
     err = SurfaceComposerClient::getDisplayInfo(mainDpy, &mainDpyInfo);
     if (err != NO_ERROR) {
@@ -57,24 +61,15 @@ WindowSurface::WindowSurface() {
     sp<SurfaceControl> sc = surfaceComposerClient->createSurface(
             String8("Benchmark"), width, height,
             PIXEL_FORMAT_RGBX_8888, ISurfaceComposerClient::eOpaque);
-    if (sc == NULL || !sc->isValid()) {
+    if (sc == nullptr || !sc->isValid()) {
         fprintf(stderr, "Failed to create SurfaceControl\n");
         return;
     }
 
-    SurfaceComposerClient::openGlobalTransaction();
-    err = sc->setLayer(0x7FFFFFFF);     // always on top
-    if (err != NO_ERROR) {
-        fprintf(stderr, "SurfaceComposer::setLayer error: %#x\n", err);
-        return;
-    }
-
-    err = sc->show();
-    if (err != NO_ERROR) {
-        fprintf(stderr, "SurfaceComposer::show error: %#x\n", err);
-        return;
-    }
-    SurfaceComposerClient::closeGlobalTransaction();
+    SurfaceComposerClient::Transaction{}
+            .setLayer(sc, 0x7FFFFFFF)
+            .show(sc)
+            .apply();
 
     mSurfaceControl = sc;
 }

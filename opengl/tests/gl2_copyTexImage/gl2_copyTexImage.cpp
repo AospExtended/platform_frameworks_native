@@ -362,7 +362,7 @@ int printEGLConfigurations(EGLDisplay dpy) {
     return true;
 }
 
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
     EGLBoolean returnValue;
     EGLConfig myConfig = {0};
 
@@ -444,7 +444,6 @@ int main(int argc, char** argv) {
     checkEglError("eglQuerySurface");
     eglQuerySurface(dpy, surface, EGL_HEIGHT, &h);
     checkEglError("eglQuerySurface");
-    GLint dim = w < h ? w : h;
 
     fprintf(stderr, "Window dimensions: %d x %d\n", w, h);
 

@@ -26,6 +26,28 @@ __BEGIN_DECLS
 
 const native_handle_t* AHardwareBuffer_getNativeHandle(const AHardwareBuffer* buffer);
 
+enum CreateFromHandleMethod {
+    // enum values chosen to match internal GraphicBuffer::HandleWrapMethod
+    AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_REGISTER = 2,
+    AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE = 3,
+};
+
+/**
+ * Create a AHardwareBuffer from a native handle.
+ *
+ * This function wraps a native handle in a AHardwareBuffer suitable for use by applications or
+ * other parts of the system. The contents of desc will be returned by AHardwareBuffer_describe().
+ *
+ * If method is AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_REGISTER, the handle is assumed to be
+ * unregistered, and it will be registered/imported before being wrapped in the AHardwareBuffer.
+ * If successful, the AHardwareBuffer will own the handle.
+ *
+ * If method is AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE, the handle will be cloned and the
+ * clone registered. The AHardwareBuffer will own the cloned handle but not the original.
+ */
+int AHardwareBuffer_createFromHandle(const AHardwareBuffer_Desc* desc,
+                                     const native_handle_t* handle, int32_t method,
+                                     AHardwareBuffer** outBuffer);
 
 /**
  * Buffer pixel formats.
@@ -51,16 +73,6 @@ enum {
     AHARDWAREBUFFER_FORMAT_RAW_OPAQUE               = 0x24,
     /* same as HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED */
     AHARDWAREBUFFER_FORMAT_IMPLEMENTATION_DEFINED   = 0x22,
-    /* same as HAL_PIXEL_FORMAT_YCBCR_420_888 */
-    AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420             = 0x23,
-    /* same as HAL_PIXEL_FORMAT_YCBCR_422_888 */
-    AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_422             = 0x27,
-    /* same as HAL_PIXEL_FORMAT_YCBCR_444_888 */
-    AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_444             = 0x28,
-    /* same as HAL_PIXEL_FORMAT_FLEX_RGB_888 */
-    AHARDWAREBUFFER_FORMAT_FLEX_R8G8B8              = 0x29,
-    /* same as HAL_PIXEL_FORMAT_FLEX_RGBA_8888 */
-    AHARDWAREBUFFER_FORMAT_FLEX_R8G8B8A8            = 0x2A,
     /* same as HAL_PIXEL_FORMAT_YCBCR_422_SP */
     AHARDWAREBUFFER_FORMAT_YCbCr_422_SP             = 0x10,
     /* same as HAL_PIXEL_FORMAT_YCRCB_420_SP */

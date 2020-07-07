@@ -15,9 +15,9 @@
 #include <pdx/rpc/remote_method.h>
 #include <pdx/rpc/serializable.h>
 #include <pdx/service.h>
+#include <pdx/service_dispatcher.h>
 #include <uds/client_channel.h>
 #include <uds/client_channel_factory.h>
-#include <uds/service_dispatcher.h>
 #include <uds/service_endpoint.h>
 
 using android::pdx::BorrowedHandle;
@@ -94,7 +94,7 @@ struct TestTemplateType {
   FileHandleType fd;
 
   TestTemplateType() {}
-  TestTemplateType(FileHandleType fd) : fd(std::move(fd)) {}
+  explicit TestTemplateType(FileHandleType fd) : fd(std::move(fd)) {}
 
  private:
   PDX_SERIALIZABLE_MEMBERS(TestTemplateType<FileHandleType>, fd);
@@ -328,7 +328,7 @@ class TestClient : public ClientBase<TestClient> {
  private:
   friend BASE;
 
-  TestClient(LocalChannelHandle channel_handle)
+  explicit TestClient(LocalChannelHandle channel_handle)
       : BASE{android::pdx::uds::ClientChannel::Create(
             std::move(channel_handle))} {}
   TestClient()
@@ -561,7 +561,7 @@ class RemoteMethodTest : public ::testing::Test {
 
   void SetUp() override {
     // Create a dispatcher to handle messages to services.
-    dispatcher_ = android::pdx::uds::ServiceDispatcher::Create();
+    dispatcher_ = android::pdx::ServiceDispatcher::Create();
     ASSERT_NE(nullptr, dispatcher_);
 
     // Start the message dispatch loop in a separate thread.

@@ -26,14 +26,35 @@ using TypeForIndex = std::tuple_element_t<I, std::tuple<Types...>>;
 template <std::size_t I, typename... Types>
 using TypeTagForIndex = TypeTag<TypeForIndex<I, Types...>>;
 
+// Similar to std::is_constructible except that it evaluates to false for bool
+// construction from pointer types: this helps prevent subtle to bugs caused by
+// assigning values that decay to pointers to Variants with bool elements.
+//
+// Here is an example of the problematic situation this trait avoids:
+//
+//  Variant<int, bool> v;
+//  const int array[3] = {1, 2, 3};
+//  v = array; // This is allowed by regular std::is_constructible.
+//
+template <typename...>
+struct IsConstructible;
+template <typename T, typename U>
+struct IsConstructible<T, U>
+    : std::integral_constant<bool,
+                             std::is_constructible<T, U>::value &&
+                                 !(std::is_same<std::decay_t<T>, bool>::value &&
+                                   std::is_pointer<std::decay_t<U>>::value)> {};
+template <typename T, typename... Args>
+struct IsConstructible<T, Args...> : std::is_constructible<T, Args...> {};
+
 // Enable if T(Args...) is well formed.
 template <typename R, typename T, typename... Args>
 using EnableIfConstructible =
-    typename std::enable_if<std::is_constructible<T, Args...>::value, R>::type;
+    typename std::enable_if<IsConstructible<T, Args...>::value, R>::type;
 // Enable if T(Args...) is not well formed.
 template <typename R, typename T, typename... Args>
 using EnableIfNotConstructible =
-    typename std::enable_if<!std::is_constructible<T, Args...>::value, R>::type;
+    typename std::enable_if<!IsConstructible<T, Args...>::value, R>::type;
 
 // Determines whether T is an element of Types...;
 template <typename... Types>
@@ -65,12 +86,11 @@ template <typename... Types>
 struct ConstructibleCount;
 template <typename From, typename To>
 struct ConstructibleCount<From, To>
-    : std::integral_constant<std::size_t,
-                             std::is_constructible<To, From>::value> {};
+    : std::integral_constant<std::size_t, IsConstructible<To, From>::value> {};
 template <typename From, typename First, typename... Rest>
 struct ConstructibleCount<From, First, Rest...>
     : std::integral_constant<std::size_t,
-                             std::is_constructible<First, From>::value +
+                             IsConstructible<First, From>::value +
                                  ConstructibleCount<From, Rest...>::value> {};
 
 // Enable if T is an element of Types...
@@ -126,6 +146,18 @@ union Union<Type> {
       : first_(std::forward<T>(value)) {
     *index_out = index;
   }
+  Union(const Union& other, std::int32_t index) {
+    if (index == 0)
+      new (&first_) Type(other.first_);
+  }
+  Union(Union&& other, std::int32_t index) {
+    if (index == 0)
+      new (&first_) Type(std::move(other.first_));
+  }
+  Union(const Union&) = delete;
+  Union(Union&&) = delete;
+  void operator=(const Union&) = delete;
+  void operator=(Union&&) = delete;
 
   Type& get(TypeTag<Type>) { return first_; }
   const Type& get(TypeTag<Type>) const { return first_; }
@@ -217,6 +249,22 @@ union Union<First, Rest...> {
   template <typename T, typename U>
   Union(std::int32_t index, std::int32_t* index_out, TypeTag<T>, U&& value)
       : rest_(index + 1, index_out, TypeTag<T>{}, std::forward<U>(value)) {}
+  Union(const Union& other, std::int32_t index) {
+    if (index == 0)
+      new (&first_) First(other.first_);
+    else
+      new (&rest_) Union<Rest...>(other.rest_, index - 1);
+  }
+  Union(Union&& other, std::int32_t index) {
+    if (index == 0)
+      new (&first_) First(std::move(other.first_));
+    else
+      new (&rest_) Union<Rest...>(std::move(other.rest_), index - 1);
+  }
+  Union(const Union&) = delete;
+  Union(Union&&) = delete;
+  void operator=(const Union&) = delete;
+  void operator=(Union&&) = delete;
 
   struct FirstType {};
   struct RestType {};
@@ -244,7 +292,7 @@ union Union<First, Rest...> {
 
   template <typename T>
   T& get(TypeTag<T>) {
-    return rest_.template get(TypeTag<T>{});
+    return rest_.get(TypeTag<T>{});
   }
   template <typename T>
   const T& get(TypeTag<T>) const {
@@ -252,7 +300,7 @@ union Union<First, Rest...> {
   }
   template <typename T>
   constexpr std::int32_t index(TypeTag<T>) const {
-    return 1 + rest_.template index(TypeTag<T>{});
+    return 1 + rest_.index(TypeTag<T>{});
   }
 
   template <typename... Args>
@@ -351,6 +399,10 @@ union Union<First, Rest...> {
 
 }  // namespace detail
 
+// Variant is a type safe union that can store values of any of its element
+// types. A Variant is different than std::tuple in that it only stores one type
+// at a time or a special empty type. Variants are always default constructible
+// to empty, even when none of the element types are default constructible.
 template <typename... Types>
 class Variant {
  private:
@@ -393,15 +445,36 @@ class Variant {
   explicit Variant(EmptyVariant) {}
   ~Variant() { Destruct(); }
 
+  Variant(const Variant& other)
+      : index_{other.index_}, value_{other.value_, other.index_} {}
+  Variant(Variant&& other) noexcept
+      : index_{other.index_}, value_{std::move(other.value_), other.index_} {}
+
+// Recent Clang versions has a regression that produces bogus
+// unused-lambda-capture warning. Suppress the warning as a temporary
+// workaround. http://b/71356631
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-lambda-capture"
   // Copy and move construction from Variant types. Each element of OtherTypes
   // must be convertible to an element of Types.
   template <typename... OtherTypes>
   explicit Variant(const Variant<OtherTypes...>& other) {
     other.Visit([this](const auto& value) { Construct(value); });
   }
+#pragma clang diagnostic pop
+
   template <typename... OtherTypes>
   explicit Variant(Variant<OtherTypes...>&& other) {
     other.Visit([this](auto&& value) { Construct(std::move(value)); });
+  }
+
+  Variant& operator=(const Variant& other) {
+    other.Visit([this](const auto& value) { *this = value; });
+    return *this;
+  }
+  Variant& operator=(Variant&& other) noexcept {
+    other.Visit([this](auto&& value) { *this = std::move(value); });
+    return *this;
   }
 
   // Construction from non-Variant types.
@@ -429,7 +502,7 @@ class Variant {
   // Handles assignment from the empty type. This overload supports assignment
   // in visitors using generic lambdas.
   Variant& operator=(EmptyVariant) {
-    Assign(EmptyVariant{});
+    Destruct();
     return *this;
   }
 
@@ -480,7 +553,7 @@ class Variant {
   template <typename T>
   constexpr std::int32_t index_of() const {
     static_assert(HasType<T>::value, "T is not an element type of Variant.");
-    return value_.template index(DecayedTypeTag<T>{});
+    return value_.index(DecayedTypeTag<T>{});
   }
 
   // Returns the index of the active type. If the Variant is empty -1 is
@@ -502,7 +575,7 @@ class Variant {
   template <typename T>
   T* get() {
     if (is<T>())
-      return &value_.template get(DecayedTypeTag<T>{});
+      return &value_.get(DecayedTypeTag<T>{});
     else
       return nullptr;
   }
@@ -516,7 +589,7 @@ class Variant {
   template <std::size_t I>
   TypeForIndex<I>* get() {
     if (is<TypeForIndex<I>>())
-      return &value_.template get(TypeTagForIndex<I>{});
+      return &value_.get(TypeTagForIndex<I>{});
     else
       return nullptr;
   }
@@ -541,7 +614,10 @@ class Variant {
   void Construct(EmptyVariant) {}
 
   // Destroys the active element of the Variant.
-  void Destruct() { value_.Destruct(index_); }
+  void Destruct() {
+    value_.Destruct(index_);
+    index_ = kEmptyIndex;
+  }
 
   // Assigns the Variant when non-empty and the current type matches the target
   // type, otherwise destroys the current value and constructs a element of the
@@ -562,8 +638,6 @@ class Variant {
       Construct(std::forward<T>(value));
     }
   }
-  // Handles assignment from an empty Variant.
-  void Assign(EmptyVariant) { Destruct(); }
 };
 
 // Utility type to extract/convert values from a variant. This class simplifies

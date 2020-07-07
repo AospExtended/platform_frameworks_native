@@ -40,8 +40,8 @@ constexpr int64_t kMbInBytes = 1024 * kKbInBytes;
 constexpr int64_t kGbInBytes = 1024 * kMbInBytes;
 constexpr int64_t kTbInBytes = 1024 * kGbInBytes;
 
-static constexpr int FLAG_FREE_CACHE_V2 = 1 << 13;
-static constexpr int FLAG_FREE_CACHE_V2_DEFY_QUOTA = 1 << 14;
+#define FLAG_FREE_CACHE_V2 InstalldNativeService::FLAG_FREE_CACHE_V2
+#define FLAG_FREE_CACHE_V2_DEFY_QUOTA InstalldNativeService::FLAG_FREE_CACHE_V2_DEFY_QUOTA
 
 int get_property(const char *key, char *value, const char *default_value) {
     return property_get(key, value, default_value);
@@ -99,7 +99,7 @@ static int64_t size(const char* path) {
 static int64_t free() {
     struct statvfs buf;
     if (!statvfs("/data/local/tmp", &buf)) {
-        return buf.f_bavail * buf.f_frsize;
+        return static_cast<int64_t>(buf.f_bavail) * buf.f_frsize;
     } else {
         PLOG(ERROR) << "Failed to statvfs";
         return -1;

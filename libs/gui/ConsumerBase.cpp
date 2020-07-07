@@ -96,7 +96,7 @@ void ConsumerBase::onLastStrongRef(const void* id __attribute__((unused))) {
 
 void ConsumerBase::freeBufferLocked(int slotIndex) {
     CB_LOGV("freeBufferLocked: slotIndex=%d", slotIndex);
-    mSlots[slotIndex].mGraphicBuffer = 0;
+    mSlots[slotIndex].mGraphicBuffer = nullptr;
     mSlots[slotIndex].mFence = Fence::NO_FENCE;
     mSlots[slotIndex].mFrameNumber = 0;
 }
@@ -110,7 +110,7 @@ void ConsumerBase::onFrameAvailable(const BufferItem& item) {
         listener = mFrameAvailableListener.promote();
     }
 
-    if (listener != NULL) {
+    if (listener != nullptr) {
         CB_LOGV("actually calling onFrameAvailable");
         listener->onFrameAvailable(item);
     }
@@ -125,7 +125,7 @@ void ConsumerBase::onFrameReplaced(const BufferItem &item) {
         listener = mFrameAvailableListener.promote();
     }
 
-    if (listener != NULL) {
+    if (listener != nullptr) {
         CB_LOGV("actually calling onFrameReplaced");
         listener->onFrameReplaced(item);
     }
@@ -182,6 +182,16 @@ bool ConsumerBase::isAbandoned() {
     return mAbandoned;
 }
 
+void ConsumerBase::setName(const String8& name) {
+    Mutex::Autolock _l(mMutex);
+    if (mAbandoned) {
+        CB_LOGE("setName: ConsumerBase is abandoned!");
+        return;
+    }
+    mName = name;
+    mConsumer->setConsumerName(name);
+}
+
 void ConsumerBase::setFrameAvailableListener(
         const wp<FrameAvailableListener>& listener) {
     CB_LOGV("setFrameAvailableListener");
@@ -235,6 +245,50 @@ status_t ConsumerBase::setDefaultBufferDataSpace(
         return NO_INIT;
     }
     return mConsumer->setDefaultBufferDataSpace(defaultDataSpace);
+}
+
+status_t ConsumerBase::setConsumerUsageBits(uint64_t usage) {
+    Mutex::Autolock lock(mMutex);
+    if (mAbandoned) {
+        CB_LOGE("setConsumerUsageBits: ConsumerBase is abandoned!");
+        return NO_INIT;
+    }
+    return mConsumer->setConsumerUsageBits(usage);
+}
+
+status_t ConsumerBase::setTransformHint(uint32_t hint) {
+    Mutex::Autolock lock(mMutex);
+    if (mAbandoned) {
+        CB_LOGE("setTransformHint: ConsumerBase is abandoned!");
+        return NO_INIT;
+    }
+    return mConsumer->setTransformHint(hint);
+}
+
+status_t ConsumerBase::setMaxAcquiredBufferCount(int maxAcquiredBuffers) {
+    Mutex::Autolock lock(mMutex);
+    if (mAbandoned) {
+        CB_LOGE("setMaxAcquiredBufferCount: ConsumerBase is abandoned!");
+        return NO_INIT;
+    }
+    return mConsumer->setMaxAcquiredBufferCount(maxAcquiredBuffers);
+}
+
+sp<NativeHandle> ConsumerBase::getSidebandStream() const {
+    Mutex::Autolock _l(mMutex);
+    if (mAbandoned) {
+        CB_LOGE("getSidebandStream: ConsumerBase is abandoned!");
+        return nullptr;
+    }
+
+    sp<NativeHandle> stream;
+    status_t err = mConsumer->getSidebandStream(&stream);
+    if (err != NO_ERROR) {
+        CB_LOGE("failed to get sideband stream: %d", err);
+        return nullptr;
+    }
+
+    return stream;
 }
 
 status_t ConsumerBase::getOccupancyHistory(bool forceFlush,
@@ -298,8 +352,8 @@ status_t ConsumerBase::acquireBufferLocked(BufferItem *item,
         return err;
     }
 
-    if (item->mGraphicBuffer != NULL) {
-        if (mSlots[item->mSlot].mGraphicBuffer != NULL) {
+    if (item->mGraphicBuffer != nullptr) {
+        if (mSlots[item->mSlot].mGraphicBuffer != nullptr) {
             freeBufferLocked(item->mSlot);
         }
         mSlots[item->mSlot].mGraphicBuffer = item->mGraphicBuffer;
@@ -335,16 +389,25 @@ status_t ConsumerBase::addReleaseFenceLocked(int slot,
         return OK;
     }
 
-    auto status = mSlots[slot].mFence->getStatus();
-
-    if (status == Fence::Status::Invalid) {
-        CB_LOGE("fence has invalid state");
+    // Check status of fences first because merging is expensive.
+    // Merging an invalid fence with any other fence results in an
+    // invalid fence.
+    auto currentStatus = mSlots[slot].mFence->getStatus();
+    if (currentStatus == Fence::Status::Invalid) {
+        CB_LOGE("Existing fence has invalid state");
         return BAD_VALUE;
     }
 
-    if (status == Fence::Status::Signaled) {
+    auto incomingStatus = fence->getStatus();
+    if (incomingStatus == Fence::Status::Invalid) {
+        CB_LOGE("New fence has invalid state");
         mSlots[slot].mFence = fence;
-    } else {  // status == Fence::Status::Unsignaled
+        return BAD_VALUE;
+    }
+
+    // If both fences are signaled or both are unsignaled, we need to merge
+    // them to get an accurate timestamp.
+    if (currentStatus == incomingStatus) {
         char fenceName[32] = {};
         snprintf(fenceName, 32, "%.28s:%d", mName.string(), slot);
         sp<Fence> mergedFence = Fence::merge(
@@ -357,7 +420,17 @@ status_t ConsumerBase::addReleaseFenceLocked(int slot,
             return BAD_VALUE;
         }
         mSlots[slot].mFence = mergedFence;
+    } else if (incomingStatus == Fence::Status::Unsignaled) {
+        // If one fence has signaled and the other hasn't, the unsignaled
+        // fence will approximately correspond with the correct timestamp.
+        // There's a small race if both fences signal at about the same time
+        // and their statuses are retrieved with unfortunate timing. However,
+        // by this point, they will have both signaled and only the timestamp
+        // will be slightly off; any dependencies after this point will
+        // already have been met.
+        mSlots[slot].mFence = fence;
     }
+    // else if (currentStatus == Fence::Status::Unsignaled) is a no-op.
 
     return OK;
 }
@@ -395,7 +468,7 @@ bool ConsumerBase::stillTracking(int slot,
     if (slot < 0 || slot >= BufferQueue::NUM_BUFFER_SLOTS) {
         return false;
     }
-    return (mSlots[slot].mGraphicBuffer != NULL &&
+    return (mSlots[slot].mGraphicBuffer != nullptr &&
             mSlots[slot].mGraphicBuffer->handle == graphicBuffer->handle);
 }
 

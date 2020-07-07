@@ -11,8 +11,10 @@ class MockClientChannel : public ClientChannel {
  public:
   MOCK_CONST_METHOD0(GetIpcTag, uint32_t());
   MOCK_CONST_METHOD0(event_fd, int());
+  MOCK_CONST_METHOD0(GetEventSources, std::vector<EventSource>());
   MOCK_METHOD1(GetEventMask, Status<int>(int));
   MOCK_METHOD0(GetChannelHandle, LocalChannelHandle&());
+  MOCK_CONST_METHOD0(GetChannelHandle, const LocalChannelHandle&());
   MOCK_METHOD0(AllocateTransactionState, void*());
   MOCK_METHOD1(FreeTransactionState, void(void* state));
   MOCK_METHOD3(SendImpulse,
@@ -48,6 +50,7 @@ class MockClientChannel : public ClientChannel {
   MOCK_CONST_METHOD3(GetChannelHandle,
                      bool(void* transaction_state, ChannelReference ref,
                           LocalChannelHandle* handle));
+  MOCK_METHOD0(TakeChannelParcelable, std::unique_ptr<ChannelParcelable>());
 };
 
 }  // namespace pdx

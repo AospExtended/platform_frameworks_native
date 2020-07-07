@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#define ATRACE_TAG ATRACE_TAG_GRAPHICS
+
 #include "layers_extensions.h"
 
 #include <alloca.h>
@@ -29,10 +31,12 @@
 #include <android/dlext.h>
 #include <android-base/strings.h>
 #include <cutils/properties.h>
+#include <graphicsenv/GraphicsEnv.h>
 #include <log/log.h>
+#include <nativebridge/native_bridge.h>
+#include <nativeloader/native_loader.h>
+#include <utils/Trace.h>
 #include <ziparchive/zip_archive.h>
-
-#include <vulkan/vulkan_loader_data.h>
 
 // TODO(jessehall): The whole way we deal with extensions is pretty hokey, and
 // not a good long-term solution. Having a hard-coded enum of extensions is
@@ -69,12 +73,19 @@ const char kSystemLayerLibraryDir[] = "/data/local/debug/vulkan";
 
 class LayerLibrary {
    public:
-    explicit LayerLibrary(const std::string& path)
-        : path_(path), dlhandle_(nullptr), refcount_(0) {}
+    explicit LayerLibrary(const std::string& path,
+                          const std::string& filename)
+        : path_(path),
+          filename_(filename),
+          dlhandle_(nullptr),
+          native_bridge_(false),
+          refcount_(0) {}
 
-    LayerLibrary(LayerLibrary&& other)
+    LayerLibrary(LayerLibrary&& other) noexcept
         : path_(std::move(other.path_)),
+          filename_(std::move(other.filename_)),
           dlhandle_(other.dlhandle_),
+          native_bridge_(other.native_bridge_),
           refcount_(other.refcount_) {
         other.dlhandle_ = nullptr;
         other.refcount_ = 0;
@@ -94,11 +105,28 @@ class LayerLibrary {
                  const char* gpa_name,
                  size_t gpa_name_len) const;
 
+    const std::string GetFilename() { return filename_; }
+
    private:
+    // TODO(b/79940628): remove that adapter when we could use NativeBridgeGetTrampoline
+    // for native libraries.
+    template<typename Func = void*>
+    Func GetTrampoline(const char* name) const {
+        if (native_bridge_) {
+            return reinterpret_cast<Func>(android::NativeBridgeGetTrampoline(
+                dlhandle_, name, nullptr, 0));
+        }
+        return reinterpret_cast<Func>(dlsym(dlhandle_, name));
+    }
+
     const std::string path_;
+
+    // Track the filename alone so we can detect duplicates
+    const std::string filename_;
 
     std::mutex mutex_;
     void* dlhandle_;
+    bool native_bridge_;
     size_t refcount_;
 };
 
@@ -111,22 +139,26 @@ bool LayerLibrary::Open() {
         // any symbol dependencies will be resolved by system libraries. They
         // can't safely use libc++_shared, for example. Which is one reason
         // (among several) we only allow them in non-user builds.
-        auto app_namespace = LoaderData::GetInstance().app_namespace;
+        auto app_namespace = android::GraphicsEnv::getInstance().getAppNamespace();
         if (app_namespace &&
             !android::base::StartsWith(path_, kSystemLayerLibraryDir)) {
-            android_dlextinfo dlextinfo = {};
-            dlextinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
-            dlextinfo.library_namespace = app_namespace;
-            dlhandle_ = android_dlopen_ext(path_.c_str(), RTLD_NOW | RTLD_LOCAL,
-                                           &dlextinfo);
+            char* error_msg = nullptr;
+            dlhandle_ = OpenNativeLibraryInNamespace(
+                app_namespace, path_.c_str(), &native_bridge_, &error_msg);
+            if (!dlhandle_) {
+                ALOGE("failed to load layer library '%s': %s", path_.c_str(), error_msg);
+                android::NativeLoaderFreeErrorMessage(error_msg);
+                refcount_ = 0;
+                return false;
+            }
         } else {
-            dlhandle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
-        }
-        if (!dlhandle_) {
-            ALOGE("failed to load layer library '%s': %s", path_.c_str(),
-                  dlerror());
-            refcount_ = 0;
-            return false;
+          dlhandle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!dlhandle_) {
+                ALOGE("failed to load layer library '%s': %s", path_.c_str(),
+                      dlerror());
+                refcount_ = 0;
+                return false;
+            }
         }
     }
     return true;
@@ -136,19 +168,25 @@ void LayerLibrary::Close() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (--refcount_ == 0) {
         ALOGV("closing layer library '%s'", path_.c_str());
-        dlclose(dlhandle_);
-        dlhandle_ = nullptr;
+        char* error_msg = nullptr;
+        if (!android::CloseNativeLibrary(dlhandle_, native_bridge_, &error_msg)) {
+            ALOGE("failed to unload library '%s': %s", path_.c_str(), error_msg);
+            android::NativeLoaderFreeErrorMessage(error_msg);
+            refcount_++;
+        } else {
+           dlhandle_ = nullptr;
+        }
     }
 }
 
 bool LayerLibrary::EnumerateLayers(size_t library_idx,
                                    std::vector<Layer>& instance_layers) const {
     PFN_vkEnumerateInstanceLayerProperties enumerate_instance_layers =
-        reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
-            dlsym(dlhandle_, "vkEnumerateInstanceLayerProperties"));
+        GetTrampoline<PFN_vkEnumerateInstanceLayerProperties>(
+            "vkEnumerateInstanceLayerProperties");
     PFN_vkEnumerateInstanceExtensionProperties enumerate_instance_extensions =
-        reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
-            dlsym(dlhandle_, "vkEnumerateInstanceExtensionProperties"));
+        GetTrampoline<PFN_vkEnumerateInstanceExtensionProperties>(
+            "vkEnumerateInstanceExtensionProperties");
     if (!enumerate_instance_layers || !enumerate_instance_extensions) {
         ALOGE("layer library '%s' missing some instance enumeration functions",
               path_.c_str());
@@ -157,11 +195,11 @@ bool LayerLibrary::EnumerateLayers(size_t library_idx,
 
     // device functions are optional
     PFN_vkEnumerateDeviceLayerProperties enumerate_device_layers =
-        reinterpret_cast<PFN_vkEnumerateDeviceLayerProperties>(
-            dlsym(dlhandle_, "vkEnumerateDeviceLayerProperties"));
+        GetTrampoline<PFN_vkEnumerateDeviceLayerProperties>(
+            "vkEnumerateDeviceLayerProperties");
     PFN_vkEnumerateDeviceExtensionProperties enumerate_device_extensions =
-        reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-            dlsym(dlhandle_, "vkEnumerateDeviceExtensionProperties"));
+        GetTrampoline<PFN_vkEnumerateDeviceExtensionProperties>(
+            "vkEnumerateDeviceExtensionProperties");
 
     // get layer counts
     uint32_t num_instance_layers = 0;
@@ -292,10 +330,10 @@ void* LayerLibrary::GetGPA(const Layer& layer,
     char* name = static_cast<char*>(alloca(layer_name_len + gpa_name_len + 1));
     strcpy(name, layer.properties.layerName);
     strcpy(name + layer_name_len, gpa_name);
-    if (!(gpa = dlsym(dlhandle_, name))) {
+    if (!(gpa = GetTrampoline(name))) {
         strcpy(name, "vk");
         strcpy(name + 2, gpa_name);
-        gpa = dlsym(dlhandle_, name);
+        gpa = GetTrampoline(name);
     }
     return gpa;
 }
@@ -305,8 +343,8 @@ void* LayerLibrary::GetGPA(const Layer& layer,
 std::vector<LayerLibrary> g_layer_libraries;
 std::vector<Layer> g_instance_layers;
 
-void AddLayerLibrary(const std::string& path) {
-    LayerLibrary library(path);
+void AddLayerLibrary(const std::string& path, const std::string& filename) {
+    LayerLibrary library(path + "/" + filename, filename);
     if (!library.Open())
         return;
 
@@ -393,12 +431,32 @@ void ForEachFileInPath(const std::string& path, Functor functor) {
 }
 
 void DiscoverLayersInPathList(const std::string& pathstr) {
+    ATRACE_CALL();
+
     std::vector<std::string> paths = android::base::Split(pathstr, ":");
     for (const auto& path : paths) {
         ForEachFileInPath(path, [&](const std::string& filename) {
             if (android::base::StartsWith(filename, "libVkLayer") &&
                 android::base::EndsWith(filename, ".so")) {
-                AddLayerLibrary(path + "/" + filename);
+
+                // Check to ensure we haven't seen this layer already
+                // Let the first instance of the shared object be enumerated
+                // We're searching for layers in following order:
+                // 1. system path
+                // 2. libraryPermittedPath (if enabled)
+                // 3. libraryPath
+
+                bool duplicate = false;
+                for (auto& layer : g_layer_libraries) {
+                    if (layer.GetFilename() == filename) {
+                        ALOGV("Skipping duplicate layer %s in %s",
+                              filename.c_str(), path.c_str());
+                        duplicate = true;
+                    }
+                }
+
+                if (!duplicate)
+                    AddLayerLibrary(path, filename);
             }
         });
     }
@@ -424,12 +482,13 @@ void* GetLayerGetProcAddr(const Layer& layer,
 }  // anonymous namespace
 
 void DiscoverLayers() {
-    if (property_get_bool("ro.debuggable", false) &&
-        prctl(PR_GET_DUMPABLE, 0, 0, 0, 0)) {
+    ATRACE_CALL();
+
+    if (android::GraphicsEnv::getInstance().isDebuggable()) {
         DiscoverLayersInPathList(kSystemLayerLibraryDir);
     }
-    if (!LoaderData::GetInstance().layer_path.empty())
-        DiscoverLayersInPathList(LoaderData::GetInstance().layer_path);
+    if (!android::GraphicsEnv::getInstance().getLayerPaths().empty())
+        DiscoverLayersInPathList(android::GraphicsEnv::getInstance().getLayerPaths());
 }
 
 uint32_t GetLayerCount() {
@@ -493,7 +552,7 @@ LayerRef::~LayerRef() {
     }
 }
 
-LayerRef::LayerRef(LayerRef&& other) : layer_(other.layer_) {
+LayerRef::LayerRef(LayerRef&& other) noexcept : layer_(other.layer_) {
     other.layer_ = nullptr;
 }
 

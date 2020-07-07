@@ -1,8 +1,13 @@
 // OpenGL ES 1.0 code
 
-#include <nativehelper/jni.h>
+#include <jni.h>
 #define LOG_TAG "GLJNI gl_code.cpp"
-#include <utils/Log.h>
+#include <android/log.h>
+
+#define ALOG(priority, tag, ...) ((void)__android_log_print(ANDROID_##priority, tag, __VA_ARGS__))
+
+#define ALOGI(...) ALOG(LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define ALOGE(...) ALOG(LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 #include <GLES/gl.h>
 
@@ -140,13 +145,13 @@ extern "C" {
     JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_changeBackground(JNIEnv * env, jobject obj);
 };
 
-JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_init(JNIEnv * env, jobject obj,  jint width, jint height)
+JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_init(JNIEnv * /*env*/, jobject /*obj*/,  jint width, jint height)
 {
     init_scene(width, height);
     create_texture();
 }
 
-JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_step(JNIEnv * env, jobject obj)
+JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_step(JNIEnv * /*env*/, jobject /*obj*/)
 {
     const GLfloat vertices[] = {
             -1,  -1,  0,
@@ -177,7 +182,7 @@ JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_step(JNIEnv * env, jobjec
     glDrawElements(GL_TRIANGLES, nelem, GL_UNSIGNED_SHORT, quadIndices);
 }
 
-JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_changeBackground(JNIEnv * env, jobject obj)
+JNIEXPORT void JNICALL Java_com_android_gljni_GLJNILib_changeBackground(JNIEnv * /*env*/, jobject /*obj*/)
 {
     background = 1.0f - background;
 }

@@ -21,6 +21,8 @@
 #include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
 #include <gui/bufferqueue/1.0/B2HProducerListener.h>
 
+#include <system/window.h>
+
 namespace android {
 namespace hardware {
 namespace graphics {
@@ -98,7 +100,12 @@ inline int native_handle_read_fd(native_handle_t const* nh, int index = 0) {
  */
 // convert: Return<Status> -> status_t
 inline status_t toStatusT(Return<Status> const& t) {
-    return t.isOk() ? static_cast<status_t>(static_cast<Status>(t)) : UNKNOWN_ERROR;
+    if (t.isOk()) {
+        return static_cast<status_t>(static_cast<Status>(t));
+    } else if (t.isDeadObject()) {
+        return DEAD_OBJECT;
+    }
+    return UNKNOWN_ERROR;
 }
 
 /**
@@ -109,7 +116,7 @@ inline status_t toStatusT(Return<Status> const& t) {
  */
 // convert: Return<void> -> status_t
 inline status_t toStatusT(Return<void> const& t) {
-    return t.isOk() ? OK : UNKNOWN_ERROR;
+    return t.isOk() ? OK : (t.isDeadObject() ? DEAD_OBJECT : UNKNOWN_ERROR);
 }
 
 /**
@@ -125,7 +132,7 @@ inline void wrapAs(AnwBuffer* t, GraphicBuffer const& l) {
     t->attr.stride = l.getStride();
     t->attr.format = static_cast<PixelFormat>(l.getPixelFormat());
     t->attr.layerCount = l.getLayerCount();
-    t->attr.usage = l.getUsage();
+    t->attr.usage = uint32_t(l.getUsage());     // FIXME: need 64-bits usage version
     t->attr.id = l.getId();
     t->attr.generationNumber = l.getGenerationNumber();
     t->nativeHandle = hidl_handle(l.handle);
@@ -894,7 +901,7 @@ inline bool convertTo(
     int const* constFds = static_cast<int const*>(baseFds.get());
     numFds = baseNumFds;
     if (l->unflatten(constBuffer, size, constFds, numFds) != NO_ERROR) {
-        for (auto nhA : nhAA) {
+        for (const auto& nhA : nhAA) {
             for (auto nh : nhA) {
                 if (nh != nullptr) {
                     native_handle_close(nh);
@@ -905,8 +912,8 @@ inline bool convertTo(
         return false;
     }
 
-    for (auto nhA : nhAA) {
-        for (auto nh : nhA) {
+    for (const auto& nhA : nhAA) {
+        for (const auto& nh : nhA) {
             if (nh != nullptr) {
                 native_handle_delete(nh);
             }
@@ -988,14 +995,15 @@ status_t H2BGraphicBufferProducer::setAsyncMode(bool async) {
     return toStatusT(mBase->setAsyncMode(async));
 }
 
-status_t H2BGraphicBufferProducer::dequeueBuffer(
-        int* slot, sp<Fence>* fence,
-        uint32_t w, uint32_t h, ::android::PixelFormat format,
-        uint32_t usage, FrameEventHistoryDelta* outTimestamps) {
+// FIXME: usage bits truncated -- needs a 64-bits usage version
+status_t H2BGraphicBufferProducer::dequeueBuffer(int* slot, sp<Fence>* fence, uint32_t w,
+                                                 uint32_t h, ::android::PixelFormat format,
+                                                 uint64_t usage, uint64_t* outBufferAge,
+                                                 FrameEventHistoryDelta* outTimestamps) {
     *fence = new Fence();
     status_t fnStatus;
     status_t transStatus = toStatusT(mBase->dequeueBuffer(
-            w, h, static_cast<PixelFormat>(format), usage,
+            w, h, static_cast<PixelFormat>(format), uint32_t(usage),
             outTimestamps != nullptr,
             [&fnStatus, slot, fence, outTimestamps] (
                     Status status,
@@ -1015,6 +1023,10 @@ status_t H2BGraphicBufferProducer::dequeueBuffer(
                     fnStatus = fnStatus == NO_ERROR ? BAD_VALUE : fnStatus;
                 }
             }));
+    if (outBufferAge) {
+        // Since the HAL version doesn't return the buffer age, set it to 0:
+        *outBufferAge = 0;
+    }
     return transStatus == NO_ERROR ? fnStatus : transStatus;
 }
 
@@ -1144,10 +1156,11 @@ status_t H2BGraphicBufferProducer::setSidebandStream(
     return toStatusT(mBase->setSidebandStream(stream == nullptr ? nullptr : stream->handle()));
 }
 
+// FIXME: usage bits truncated -- needs a 64-bits usage version
 void H2BGraphicBufferProducer::allocateBuffers(uint32_t width, uint32_t height,
-        ::android::PixelFormat format, uint32_t usage) {
+        ::android::PixelFormat format, uint64_t usage) {
     mBase->allocateBuffers(
-            width, height, static_cast<PixelFormat>(format), usage);
+            width, height, static_cast<PixelFormat>(format), uint32_t(usage));
 }
 
 status_t H2BGraphicBufferProducer::allowAllocation(bool allow) {
@@ -1224,6 +1237,18 @@ status_t H2BGraphicBufferProducer::getUniqueId(uint64_t* outId) const {
                 *outId = id;
             }));
     return transStatus == NO_ERROR ? fnStatus : transStatus;
+}
+
+status_t H2BGraphicBufferProducer::getConsumerUsage(uint64_t* outUsage) const {
+    ALOGW("getConsumerUsage is not fully supported");
+    int result;
+    status_t transStatus = toStatusT(mBase->query(
+            NATIVE_WINDOW_CONSUMER_USAGE_BITS,
+            [&result, outUsage] (int32_t tResult, int32_t tValue) {
+                result = static_cast<int>(tResult);
+                *outUsage = static_cast<uint64_t>(tValue);
+            }));
+    return transStatus == NO_ERROR ? result : static_cast<int>(transStatus);
 }
 
 }  // namespace utils
