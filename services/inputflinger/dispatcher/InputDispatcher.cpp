@@ -3745,6 +3745,7 @@ void InputDispatcher::setInputWindowsLocked(
                       newFocusedWindowHandle->getName().c_str(), displayId);
             }
             mFocusedWindowHandlesByDisplay[displayId] = newFocusedWindowHandle;
+	    resetNoFocusedWindowTimeoutLocked();
             enqueueFocusEventLocked(*newFocusedWindowHandle, true /*hasFocus*/);
         }
 
