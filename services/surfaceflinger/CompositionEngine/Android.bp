@@ -41,7 +41,10 @@ cc_defaults {
 
 cc_library {
     name: "libcompositionengine",
-    defaults: ["libcompositionengine_defaults"],
+    defaults: [
+        "libcompositionengine_defaults",
+        "surfaceflinger_fod_lib_defaults",
+    ],
     srcs: [
         "src/ClientCompositionRequestCache.cpp",
         "src/CompositionEngine.cpp",
@@ -49,7 +52,6 @@ cc_library {
         "src/DisplayColorProfile.cpp",
         "src/DisplaySurface.cpp",
         "src/DumpHelpers.cpp",
-        "src/FodExtension.cpp",
         "src/HwcBufferCache.cpp",
         "src/LayerFECompositionState.cpp",
         "src/Output.cpp",
@@ -60,14 +62,6 @@ cc_library {
     ],
     local_include_dirs: ["include"],
     export_include_dirs: ["include"],
-    product_variables: {
-        aosp: {
-            target_surfaceflinger_fod_lib: {
-                cflags: ["-DTARGET_PROVIDES_FOD_LIB"],
-                whole_static_libs: ["%s"],
-            },
-        },
-    },
 
 }
 
@@ -91,6 +85,14 @@ cc_library {
         "libcompositionengine",
     ],
     local_include_dirs: ["include"],
+    export_include_dirs: ["include"],
+}
+
+cc_library_static {
+    name: "surfaceflinger_fod_lib",
+    srcs: [
+        "src/FodExtension.cpp",
+    ],
     export_include_dirs: ["include"],
 }
 
