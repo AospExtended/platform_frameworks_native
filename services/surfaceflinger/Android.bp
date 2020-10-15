@@ -13,7 +13,10 @@ cc_defaults {
 
 cc_defaults {
     name: "libsurfaceflinger_defaults",
-    defaults: ["surfaceflinger_defaults"],
+    defaults: [
+        "surfaceflinger_defaults",
+        "surfaceflinger_qcom_ext_defaults",
+    ],
     cflags: [
         "-DLOG_TAG=\"SurfaceFlinger\"",
         "-DGL_GLEXT_PROTOTYPES",
@@ -80,14 +83,6 @@ cc_defaults {
         "android.hardware.graphics.composer@2.3-command-buffer",
         "android.hardware.graphics.composer@2.4-command-buffer",
     ],
-    product_variables: {
-        aosp: {
-            qcom_um_soong_namespace: {
-                cflags: ["-DQCOM_UM_FAMILY"],
-                header_libs: ["//%s:display_intf_headers"],
-            },
-        },
-    },
     export_static_lib_headers: [
         "libcompositionengine",
         "librenderengine",
