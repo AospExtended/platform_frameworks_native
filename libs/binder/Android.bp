@@ -163,6 +163,10 @@ cc_library {
         sampling: true,
         profile_file: "libbinder/libbinder.profdata",
     },
+
+    lto: {
+        thin: true,
+    },
 }
 
 // AIDL interface between libbinder and framework.jar
