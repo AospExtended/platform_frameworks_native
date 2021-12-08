@@ -37,7 +37,7 @@ namespace android {
 
 Mutex BpBinder::sTrackingLock;
 std::unordered_map<int32_t, uint32_t> BpBinder::sTrackingMap;
-std::unordered_map<int32_t, uint32_t> BpBinder::sLastLimitCallbackMap;
+std::unordered_map<int32_t, uint32_t> sLastLimitCallbackMap;
 int BpBinder::sNumTrackedUids = 0;
 std::atomic_bool BpBinder::sCountByUidEnabled(false);
 binder_proxy_limit_callback BpBinder::sLimitCallback;
@@ -126,7 +126,7 @@ sp<BpBinder> BpBinder::create(int32_t handle) {
             uint32_t lastLimitCallbackAt = sLastLimitCallbackMap[trackedUid];
 
             if (trackedValue > lastLimitCallbackAt &&
-                (trackedValue - lastLimitCallbackAt > REPEAT_LIMIT_CALLBACK_INTERVAL)) {
+                (trackedValue - lastLimitCallbackAt > sBinderProxyCountHighWatermark)) {
                 ALOGE("Still too many binder proxy objects sent to uid %d from uid %d (%d proxies "
                       "held)",
                       getuid(), trackedUid, trackedValue);
