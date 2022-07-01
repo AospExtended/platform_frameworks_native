@@ -2210,10 +2210,10 @@ TEST_F(RefreshRateConfigsTest, getBestRefreshRate_deviceWithCloseRefreshRates) {
 // b/190578904
 TEST_F(RefreshRateConfigsTest, getBestRefreshRate_conflictingVotes) {
     const DisplayModes displayModes = {
-            createDisplayMode(DisplayModeId(0), 0, (43_Hz).getPeriodNsecs()),
-            createDisplayMode(DisplayModeId(1), 0, (53_Hz).getPeriodNsecs()),
-            createDisplayMode(DisplayModeId(2), 0, (55_Hz).getPeriodNsecs()),
-            createDisplayMode(DisplayModeId(3), 0, (60_Hz).getPeriodNsecs()),
+            createDisplayMode(DisplayModeId(0), 0, Fps(43.0f).getPeriodNsecs()),
+            createDisplayMode(DisplayModeId(1), 0, Fps(53.0f).getPeriodNsecs()),
+            createDisplayMode(DisplayModeId(2), 0, Fps(55.0f).getPeriodNsecs()),
+            createDisplayMode(DisplayModeId(3), 0, Fps(60.0f).getPeriodNsecs()),
     };
 
     const RefreshRateConfigs::GlobalSignals globalSignals = {.touch = false, .idle = false};
@@ -2224,19 +2224,20 @@ TEST_F(RefreshRateConfigsTest, getBestRefreshRate_conflictingVotes) {
     const auto layers = std::vector<LayerRequirement>{
             LayerRequirement{
                     .vote = LayerVoteType::ExplicitDefault,
-                    .desiredRefreshRate = 43_Hz,
+                    .desiredRefreshRate = Fps(43.0f),
                     .seamlessness = Seamlessness::SeamedAndSeamless,
                     .weight = 0.41f,
             },
             LayerRequirement{
                     .vote = LayerVoteType::ExplicitExactOrMultiple,
-                    .desiredRefreshRate = 53_Hz,
+                    .desiredRefreshRate = Fps(53.0f),
                     .seamlessness = Seamlessness::SeamedAndSeamless,
                     .weight = 0.41f,
             },
     };
 
-    EXPECT_EQ(53_Hz, refreshRateConfigs->getBestRefreshRate(layers, globalSignals).getFps());
+    EXPECT_EQ(53,
+              refreshRateConfigs->getBestRefreshRate(layers, globalSignals).getFps().getIntValue());
 }
 
 TEST_F(RefreshRateConfigsTest, testComparisonOperator) {

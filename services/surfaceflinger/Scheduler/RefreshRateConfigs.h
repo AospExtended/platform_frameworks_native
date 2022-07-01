@@ -450,12 +450,12 @@ private:
     float calculateLayerScoreLocked(const LayerRequirement&, const RefreshRate&,
                                     bool isSeamlessSwitch) const REQUIRES(mLock);
 
+    float calculateNonExactMatchingLayerScoreLocked(const LayerRequirement&,
+                                                    const RefreshRate&) const REQUIRES(mLock);
+
     void updateDisplayModes(const DisplayModes& mode, DisplayModeId currentModeId) EXCLUDES(mLock);
 
     void initializeIdleTimer();
-
-    float calculateNonExactMatchingLayerScoreLocked(const LayerRequirement&,
-                                                    const RefreshRate&) const REQUIRES(mLock);
 
     // The list of refresh rates, indexed by display modes ID. This may change after this
     // object is initialized.
